@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/SolutionItems/">
+    <File Path=".editorconfig" />
+    <File Path=".gitignore" />
+    <File Path="CONSTITUTION.md" />
+    <File Path="LICENSE" />
+    <File Path="mise.toml" />
+    <File Path="README.md" />
+  </Folder>
+  <Project Path="Streamlinr.Core.Tests/Streamlinr.Core.Tests.fsproj" />
+  <Project Path="Streamlinr.Core/Streamlinr.Core.fsproj" />
+  <Project Path="Streamlinr.IntegrationTests/Streamlinr.IntegrationTests.csproj" />
+  <Project Path="Streamlinr.Tests/Streamlinr.Tests.csproj" />
+  <Project Path="Streamlinr/Streamlinr.csproj" />
+</Solution>

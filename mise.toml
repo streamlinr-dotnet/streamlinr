@@ -1,0 +1,25 @@
+[tools]
+dotnet = "10.0.300"
+
+[env]
+DOTNET_CLI_TELEMETRY_OPTOUT = "true"
+
+[tasks.build]
+description = "Build the full solution in Release configuration"
+run = "dotnet build Streamlinr.slnx --configuration Release"
+
+[tasks.test]
+description = "Run unit tests only"
+run = [
+  "dotnet test Streamlinr.Core.Tests/Streamlinr.Core.Tests.fsproj --configuration Release",
+  "dotnet test Streamlinr.Tests/Streamlinr.Tests.csproj --configuration Release",
+]
+
+[tasks.integration]
+description = "Run Kafka integration tests"
+run = "dotnet test Streamlinr.IntegrationTests/Streamlinr.IntegrationTests.csproj --configuration Release"
+
+[tasks.package]
+description = "Create the Streamlinr NuGet package"
+depends = ["build"]
+run = "dotnet pack Streamlinr/Streamlinr.csproj --configuration Release --no-build --output artifacts/packages"
