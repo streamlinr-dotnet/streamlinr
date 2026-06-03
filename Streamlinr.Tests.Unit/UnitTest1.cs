@@ -1,4 +1,4 @@
-﻿namespace Streamlinr;
+﻿namespace Streamlinr.Tests.Unit;
 
 using Xunit;
 

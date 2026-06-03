@@ -121,6 +121,8 @@ Prefer concepts such as:
 
 Avoid exposing broker implementation details, protocol concerns, or internal topic mechanics unless there is a compelling operational reason to do so.
 
+Architecture tests enforce this boundary: public Streamlinr APIs must model stream processing concepts and must not expose Kafka client types or private runtime implementation details.
+
 The conceptual model should remain portable wherever practical.
 
 ---
@@ -174,6 +176,7 @@ When proposing changes:
 5. Avoid introducing Java concepts unless they solve a genuine problem.
 6. Explain trade-offs explicitly.
 7. Challenge designs that exist solely for Kafka Streams compatibility.
+8. Treat architecture test failures as design feedback, not test noise. Public APIs must not expose `Streamlinr.Core` implementation types, Kafka client types, actor protocols, mailboxes, discriminated unions, or other runtime details. Fix leaks by introducing Streamlinr-owned public abstractions and translating internally.
 
 The goal is not to recreate Kafka Streams.
 

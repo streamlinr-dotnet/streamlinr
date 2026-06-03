@@ -1,34 +1,45 @@
 namespace Streamlinr
 
-type private Actor<'TProtocol> = Actor of MailboxProcessor<'TProtocol>
+open System
 
-type private Context<'TProtocol> =
+type internal Actor<'TProtocol> = private Actor of MailboxProcessor<'TProtocol>
+
+type internal ActorContext<'TProtocol> =
     { Message: 'TProtocol
       Self: Actor<'TProtocol> }
 
-and private Behaviour<'TProtocol> = Context<'TProtocol> -> ActorResult<'TProtocol>
+and internal Behaviour<'TProtocol> = ActorContext<'TProtocol> -> ActorResult<'TProtocol>
 
-and private ActorResult<'TProtocol> =
-    | Ok
+and internal ActorResult<'TProtocol> =
+    | Handled
     | Become of Behaviour<'TProtocol>
     | Terminate
     | Unhandled
 
 [<RequireQualifiedAccess>]
-module private Agent =
-    let startNew<'TProtocol> (initialBehaviour: Behaviour<'TProtocol>) =
-        Actor (MailboxProcessor<'TProtocol>.Start(fun inbox ->
-            let rec messageLoop currentBehaviour =
-                async {
-                    let! message = inbox.Receive()
+module internal Actor =
+    let startWithErrorHandler<'TProtocol> (onError: exn -> unit) (initialBehaviour: Behaviour<'TProtocol>) =
+        let mailbox =
+            MailboxProcessor<'TProtocol>.Start(fun inbox ->
+                let rec messageLoop currentBehaviour =
+                    async {
+                        let! message = inbox.Receive()
 
-                    match currentBehaviour { Message = message; Self = Actor inbox } with
-                    | Ok -> return! messageLoop currentBehaviour
-                    | Become newBehaviour -> return! messageLoop newBehaviour
-                    | Terminate -> return ()
-                    | Unhandled -> failwithf $"message of type '%A{message}' was unhandled"
-                }
+                        match currentBehaviour { Message = message; Self = Actor inbox } with
+                        | Handled -> return! messageLoop currentBehaviour
+                        | Become newBehaviour -> return! messageLoop newBehaviour
+                        | Terminate -> return ()
+                        | Unhandled -> raise (InvalidOperationException $"message '%A{message}' was unhandled")
+                    }
 
-            Event.add (printfn "%A") inbox.Error
+                inbox.Error.Add onError
 
-            messageLoop initialBehaviour))
+                messageLoop initialBehaviour)
+
+        Actor mailbox
+
+    let start<'TProtocol> (initialBehaviour: Behaviour<'TProtocol>) =
+        startWithErrorHandler ignore initialBehaviour
+
+    let post<'TProtocol> message (Actor mailbox: Actor<'TProtocol>) =
+        mailbox.Post message

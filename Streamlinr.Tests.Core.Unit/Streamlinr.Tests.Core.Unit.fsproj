@@ -2,11 +2,13 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-    <LangVersion>default</LangVersion>
+    <RootNamespace>Streamlinr</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="ActorTests.fs" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
@@ -18,7 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Streamlinr\Streamlinr.csproj" />
+    <ProjectReference Include="..\Streamlinr.Core\Streamlinr.Core.fsproj" />
   </ItemGroup>
 
 </Project>

@@ -7,9 +7,10 @@
     <File Path="mise.toml" />
     <File Path="README.md" />
   </Folder>
-  <Project Path="Streamlinr.Core.Tests/Streamlinr.Core.Tests.fsproj" />
   <Project Path="Streamlinr.Core/Streamlinr.Core.fsproj" />
-  <Project Path="Streamlinr.IntegrationTests/Streamlinr.IntegrationTests.csproj" />
-  <Project Path="Streamlinr.Tests/Streamlinr.Tests.csproj" />
+  <Project Path="Streamlinr.Tests.Architecture\Streamlinr.Tests.Architecture.csproj" />
+  <Project Path="Streamlinr.Tests.Core.Unit\Streamlinr.Tests.Core.Unit.fsproj" />
+  <Project Path="Streamlinr.Tests.Integration\Streamlinr.Tests.Integration.csproj" />
+  <Project Path="Streamlinr.Tests.Unit/Streamlinr.Tests.Unit.csproj" />
   <Project Path="Streamlinr/Streamlinr.csproj" />
 </Solution>

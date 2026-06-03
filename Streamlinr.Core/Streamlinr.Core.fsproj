@@ -10,6 +10,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Streamlinr.Tests.Core.Unit" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Include="Actor.fs" />
   </ItemGroup>
 
