@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <Compile Include="ActorTests.fs" />
+    <Compile Include="RuntimeTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

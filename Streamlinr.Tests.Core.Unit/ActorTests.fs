@@ -23,12 +23,12 @@ module ActorTests =
         let processed = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
         let actor =
-            Actor.start (fun context ->
+            Actor.start (Behaviour (fun context ->
                 match context.Message with
                 | Ping completion ->
                     completion.SetResult()
                     Handled
-                | _ -> Unhandled)
+                | _ -> Unhandled))
 
         Actor.post (Ping processed) actor
 
@@ -40,21 +40,21 @@ module ActorTests =
     let ``actor can change behaviour`` () =
         let state = TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously)
 
-        let secondBehaviour context =
+        let secondBehaviour = Behaviour (fun context ->
             match context.Message with
             | GetState completion ->
                 completion.SetResult "second"
                 Handled
-            | _ -> Unhandled
+            | _ -> Unhandled)
 
         let actor =
-            Actor.start (fun context ->
+            Actor.start (Behaviour (fun context ->
                 match context.Message with
                 | Switch -> Become secondBehaviour
                 | GetState completion ->
                     completion.SetResult "first"
                     Handled
-                | _ -> Unhandled)
+                | _ -> Unhandled))
 
         Actor.post Switch actor
         Actor.post (GetState state) actor
@@ -67,7 +67,7 @@ module ActorTests =
         let stopped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
         let actor =
-            Actor.start (fun context ->
+            Actor.start (Behaviour (fun context ->
                 match context.Message with
                 | Increment ->
                     Interlocked.Increment count |> ignore
@@ -75,7 +75,7 @@ module ActorTests =
                 | Stop completion ->
                     completion.SetResult()
                     Terminate
-                | _ -> Unhandled)
+                | _ -> Unhandled))
 
         Actor.post Increment actor
         Actor.post (Stop stopped) actor
@@ -91,7 +91,7 @@ module ActorTests =
         let error = TaskCompletionSource<exn>(TaskCreationOptions.RunContinuationsAsynchronously)
 
         let actor =
-            Actor.startWithErrorHandler error.SetResult (fun _ -> Unhandled)
+            Actor.startWithErrorHandler error.SetResult (Behaviour (fun _ -> Unhandled))
 
         Actor.post Unexpected actor
 
