@@ -25,9 +25,9 @@ type internal BatchProcessingResult(batchId: Guid, processedRecordCount: int) =
 
 type internal RecordProcessor = delegate of SourceRecord * CancellationToken -> Task
 
-type internal ProcessorPlan(processorId: string, sourceId: string, processor: RecordProcessor) =
+type internal ProcessorPlan(processorId: string, sourceIds: IReadOnlyList<string>, processor: RecordProcessor) =
     member _.ProcessorId = processorId
-    member _.SourceId = sourceId
+    member _.SourceIds = sourceIds
     member _.Processor = processor
 
 type internal SourcePlan(sourceId: string, topic: string, keyTypeName: string, valueTypeName: string) =
@@ -227,12 +227,20 @@ module internal KafkaConsumerActor =
 [<RequireQualifiedAccess>]
 module internal TopologyActor =
     let private validate (plan: TopologyPlan) : Result<unit, TopologyStartError> =
-        if plan.Sources.Count <> 1 then
-            Error({ Message = "Exactly one source is supported by the initial runtime." } : TopologyStartError)
+        if plan.Sources.Count = 0 then
+            Error({ Message = "At least one source is required." } : TopologyStartError)
         elif plan.Processors.Count = 0 then
             Error({ Message = "At least one processor is required." } : TopologyStartError)
         else
             Ok()
+
+    let private stopConsumers consumers =
+        for consumer in consumers do
+            Actor.postAndAsyncReply StopConsuming consumer |> Async.RunSynchronously
+
+    let private stopProcessors processors =
+        for _, processor in processors do
+            Actor.postAndAsyncReply StopProcessor processor |> Async.RunSynchronously
 
     let start (runtimePlan: RuntimePlan) (supervisor: Actor<RuntimeSupervisorMessage>) (cancellationToken: CancellationToken) =
         let rec created = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
@@ -245,20 +253,30 @@ module internal TopologyActor =
                 | Ok () ->
                     let processors =
                         plan.Processors
-                        |> Seq.map (fun processor -> processor.ProcessorId, ProcessorActor.start processor cancellationToken)
-                        |> Map.ofSeq
+                        |> Seq.map (fun processor -> processor, ProcessorActor.start processor cancellationToken)
+                        |> Seq.toList
 
-                    let source = plan.Sources[0]
-                    let consumer = KafkaConsumerActor.start ()
-                    let consumerPlan = ConsumerPlan(runtimePlan.ApplicationId, runtimePlan.BootstrapServers, source.Topic, runtimePlan.ApplicationId, source.SourceId, 1, TimeSpan.FromMilliseconds 100.0)
-                    let started = Actor.postAndAsyncReply (fun channel -> StartConsuming(consumerPlan, context.Self, channel)) consumer |> Async.RunSynchronously
+                    let consumers = ResizeArray<Actor<KafkaConsumerMessage>>()
+                    let mutable startError = None
 
-                    match started with
-                    | Ok () ->
+                    for source in plan.Sources do
+                        if startError.IsNone then
+                            let consumer = KafkaConsumerActor.start ()
+                            let consumerPlan = ConsumerPlan(runtimePlan.ApplicationId, runtimePlan.BootstrapServers, source.Topic, runtimePlan.ApplicationId, source.SourceId, 1, TimeSpan.FromMilliseconds 100.0)
+                            let started = Actor.postAndAsyncReply (fun channel -> StartConsuming(consumerPlan, context.Self, channel)) consumer |> Async.RunSynchronously
+
+                            match started with
+                            | Ok () -> consumers.Add consumer
+                            | Error error -> startError <- Some error.Message
+
+                    match startError with
+                    | None ->
                         reply.Reply(Ok())
-                        Become(running processors consumer)
-                    | Error error ->
-                        reply.Reply(Error { Message = error.Message })
+                        Become(running processors (consumers |> Seq.toList))
+                    | Some error ->
+                        stopConsumers consumers
+                        stopProcessors processors
+                        reply.Reply(Error { Message = error })
                         Terminate
             | GetTopologyStatus reply ->
                 reply.Reply TopologyCreated
@@ -268,31 +286,30 @@ module internal TopologyActor =
                 Terminate
             | _ -> Unhandled)
 
-        and running processors consumer = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
+        and running processors consumers = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
             match context.Message with
             | SourceBatchReceived batch ->
                 task {
-                    for KeyValue (processorId, processor) in processors do
-                        let! result = Actor.postAndAsyncReply (fun channel -> ProcessBatch(batch, channel)) processor |> Async.StartAsTask
+                    for processorPlan, processor in processors do
+                        if processorPlan.SourceIds |> Seq.contains batch.SourceId then
+                            let! result = Actor.postAndAsyncReply (fun channel -> ProcessBatch(batch, channel)) processor |> Async.StartAsTask
 
-                        match result with
-                        | Ok _ -> ()
-                        | Error error -> Actor.post (ProcessorFailed(processorId, error.Error)) context.Self
+                            match result with
+                            | Ok _ -> ()
+                            | Error error -> Actor.post (ProcessorFailed(processorPlan.ProcessorId, error.Error)) context.Self
                 }
                 |> ignore
 
                 Handled
             | SourceFailed (topic, error) ->
                 Actor.post (ChildFailed($"source:{topic}", error)) supervisor
-                Become(failed error.Message processors consumer)
+                Become(failed error.Message processors consumers)
             | ProcessorFailed (processorId, error) ->
                 Actor.post (ChildFailed($"processor:{processorId}", error)) supervisor
-                Become(failed error.Message processors consumer)
+                Become(failed error.Message processors consumers)
             | StopTopology reply ->
-                Actor.postAndAsyncReply StopConsuming consumer |> Async.RunSynchronously
-
-                for processor in processors.Values do
-                    Actor.postAndAsyncReply StopProcessor processor |> Async.RunSynchronously
+                stopConsumers consumers
+                stopProcessors processors
 
                 reply.Reply()
                 Terminate
@@ -301,13 +318,11 @@ module internal TopologyActor =
                 Handled
             | _ -> Unhandled)
 
-        and failed message processors consumer = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
+        and failed message processors consumers = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
             match context.Message with
             | StopTopology reply ->
-                Actor.postAndAsyncReply StopConsuming consumer |> Async.RunSynchronously
-
-                for processor in processors.Values do
-                    Actor.postAndAsyncReply StopProcessor processor |> Async.RunSynchronously
+                stopConsumers consumers
+                stopProcessors processors
 
                 reply.Reply()
                 Terminate

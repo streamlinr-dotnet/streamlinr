@@ -17,7 +17,7 @@ module RuntimeTests =
             RecordProcessor(fun record _ ->
                 processed.SetResult record
                 Task.CompletedTask)
-        let plan = ProcessorPlan("peek-1", "source-1", processor)
+        let plan = ProcessorPlan("peek-1", [| "source-1" |], processor)
         let actor = ProcessorActor.start plan CancellationToken.None
         let record = SourceRecord("orders", 0, 1L, "order-1", "created", Nullable())
         let batch = SourceRecordBatch(Guid.NewGuid(), "source-1", [| record |], DateTimeOffset.UtcNow)
@@ -33,7 +33,7 @@ module RuntimeTests =
             RecordProcessor(fun _ _ ->
                 raise (InvalidOperationException("callback failed"))
                 Task.CompletedTask)
-        let plan = ProcessorPlan("peek-1", "source-1", processor)
+        let plan = ProcessorPlan("peek-1", [| "source-1" |], processor)
         let actor = ProcessorActor.start plan CancellationToken.None
         let record = SourceRecord("orders", 0, 1L, "order-1", "created", Nullable())
         let batch = SourceRecordBatch(Guid.NewGuid(), "source-1", [| record |], DateTimeOffset.UtcNow)

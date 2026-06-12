@@ -12,6 +12,29 @@ public sealed class TopologyBuilderTests {
     }
 
     [Fact]
+    public void TopologyCanMergeStreams() {
+        var topology = new TopologyBuilder();
+        var orders = topology.Stream<String, String>("orders");
+        var payments = topology.Stream<String, String>("payments");
+
+        topology.Merge(orders, payments)
+            .Peek((_, _) => ValueTask.CompletedTask);
+    }
+
+    [Fact]
+    public void MergeRequiresStreamsFromSameTopology() {
+        var first = new TopologyBuilder();
+        var second = new TopologyBuilder();
+
+        var error = Assert.Throws<InvalidOperationException>(() => first.Merge(
+            first.Stream<String, String>("orders"),
+            second.Stream<String, String>("payments")
+        ));
+
+        Assert.Contains("same topology", error.Message);
+    }
+
+    [Fact]
     public async Task RunRequiresApplicationId() {
         var options = new StreamlinrOptions { BootstrapServers = "localhost:9092" };
 
@@ -44,6 +67,25 @@ public sealed class TopologyBuilderTests {
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => StreamlinrApplication.RunAsync(
             options,
             topology => topology.Stream<Int32, String>("orders").Peek((_, _) => ValueTask.CompletedTask),
+            TestContext.Current.CancellationToken
+        ));
+
+        Assert.Contains("string keys and string values", error.Message);
+    }
+
+    [Fact]
+    public async Task InitialRuntimeRejectsNonStringMultipleStreams() {
+        var options = new StreamlinrOptions { ApplicationId = "orders-app", BootstrapServers = "localhost:9092" };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => StreamlinrApplication.RunAsync(
+            options,
+            topology => {
+                var orders = topology.Stream<String, String>("orders");
+                var payments = topology.Stream<Int32, String>("payments");
+
+                orders.Peek((_, _) => ValueTask.CompletedTask);
+                payments.Peek((_, _) => ValueTask.CompletedTask);
+            },
             TestContext.Current.CancellationToken
         ));
 

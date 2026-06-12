@@ -29,33 +29,33 @@ static public class StreamlinrApplication {
         if (String.IsNullOrWhiteSpace(options.BootstrapServers))
             throw new InvalidOperationException("BootstrapServers is required.");
 
-        if (topology.Sources.Count != 1)
-            throw new InvalidOperationException("Exactly one stream source is supported by the initial runtime.");
+        if (topology.Sources.Count == 0)
+            throw new InvalidOperationException("At least one stream source is required.");
 
         if (topology.Processors.Count == 0)
             throw new InvalidOperationException("At least one processor is required.");
 
-        var source = topology.Sources[0];
-
-        if (source.KeyType != typeof(String) || source.ValueType != typeof(String))
+        if (topology.Sources.Any(source => source.KeyType != typeof(String) || source.ValueType != typeof(String)))
             throw new InvalidOperationException("The initial runtime supports only string keys and string values.");
 
-        var sourcePlan = new SourcePlan(
-            source.SourceId,
-            source.Topic,
-            source.KeyType.FullName ?? source.KeyType.Name,
-            source.ValueType.FullName ?? source.ValueType.Name
-        );
+        var sourcePlans = topology.Sources
+            .Select(source => new SourcePlan(
+                source.SourceId,
+                source.Topic,
+                source.KeyType.FullName ?? source.KeyType.Name,
+                source.ValueType.FullName ?? source.ValueType.Name
+            ))
+            .ToArray();
 
         var processorPlans = topology.Processors
             .Select(processor => new ProcessorPlan(
                 processor.ProcessorId,
-                processor.SourceId,
+                processor.SourceIds.ToArray(),
                 (record, token) => processor.Callback(record.Key, record.Value, token))
             )
             .ToArray();
 
-        var topologyPlan = new TopologyPlan("default", [sourcePlan], processorPlans);
+        var topologyPlan = new TopologyPlan("default", sourcePlans, processorPlans);
 
         return new RuntimePlan(options.ApplicationId, options.BootstrapServers, [topologyPlan]);
     }

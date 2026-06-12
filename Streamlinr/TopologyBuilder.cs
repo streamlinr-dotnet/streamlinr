@@ -5,9 +5,12 @@ namespace Streamlinr;
 /// </summary>
 public class TopologyBuilder {
     readonly List<SourceDeclaration> _sources = [];
+    readonly List<MergeDeclaration> _merges = [];
     readonly List<ProcessorDeclaration> _processors = [];
 
     internal IReadOnlyList<SourceDeclaration> Sources => _sources;
+
+    internal IReadOnlyList<MergeDeclaration> Merges => _merges;
 
     internal IReadOnlyList<ProcessorDeclaration> Processors => _processors;
 
@@ -30,7 +33,33 @@ public class TopologyBuilder {
 
         _sources.Add(source);
 
-        return new StreamBuilder<TKey, TValue>(this, source);
+        return new StreamBuilder<TKey, TValue>(this, source.SourceId, [source.SourceId]);
+    }
+
+    /// <summary>
+    /// Merges two streams with the same key and value types into one downstream stream.
+    /// </summary>
+    /// <typeparam name="TKey">The record key type.</typeparam>
+    /// <typeparam name="TValue">The record value type.</typeparam>
+    /// <param name="first">The first stream to merge.</param>
+    /// <param name="second">The second stream to merge.</param>
+    /// <returns>A builder for processors that observe records from both streams.</returns>
+    public StreamBuilder<TKey, TValue> Merge<TKey, TValue>(StreamBuilder<TKey, TValue> first, StreamBuilder<TKey, TValue> second) {
+        ArgumentNullException.ThrowIfNull(first);
+        ArgumentNullException.ThrowIfNull(second);
+
+        if (!ReferenceEquals(first.Topology, this) || !ReferenceEquals(second.Topology, this))
+            throw new InvalidOperationException("Streams must belong to the same topology.");
+
+        var sourceIds = first.SourceIds.Concat(second.SourceIds).Distinct().ToArray();
+        var merge = new MergeDeclaration(
+            MergeId  : $"merge-{_merges.Count + 1}",
+            SourceIds: sourceIds
+        );
+
+        _merges.Add(merge);
+
+        return new StreamBuilder<TKey, TValue>(this, merge.MergeId, sourceIds);
     }
 
     internal void AddProcessor(ProcessorDeclaration processor) => _processors.Add(processor);
@@ -43,12 +72,18 @@ public class TopologyBuilder {
 /// <typeparam name="TValue">The record value type.</typeparam>
 public sealed class StreamBuilder<TKey, TValue> {
     readonly TopologyBuilder _topology;
-    readonly SourceDeclaration _source;
+    readonly String _streamId;
+    readonly IReadOnlyList<String> _sourceIds;
 
-    internal StreamBuilder(TopologyBuilder topology, SourceDeclaration source) {
+    internal StreamBuilder(TopologyBuilder topology, String streamId, IReadOnlyList<String> sourceIds) {
         _topology = topology;
-        _source = source;
+        _streamId = streamId;
+        _sourceIds = sourceIds;
     }
+
+    internal TopologyBuilder Topology => _topology;
+
+    internal IReadOnlyList<String> SourceIds => _sourceIds;
 
     /// <summary>
     /// Executes a side-effect callback for each record observed on the stream.
@@ -60,7 +95,8 @@ public sealed class StreamBuilder<TKey, TValue> {
 
         _topology.AddProcessor(new ProcessorDeclaration(
             ProcessorId: $"peek-{_topology.Processors.Count + 1}",
-            SourceId   : _source.SourceId,
+            StreamId   : _streamId,
+            SourceIds  : _sourceIds,
             Callback   : (key, value, cancellationToken) => callback(new StreamRecord<TKey, TValue>((TKey)(Object)key, (TValue)(Object)value), cancellationToken).AsTask()
         ));
 
@@ -69,4 +105,5 @@ public sealed class StreamBuilder<TKey, TValue> {
 }
 
 sealed record SourceDeclaration(String SourceId, String Topic, Type KeyType, Type ValueType);
-sealed record ProcessorDeclaration(String ProcessorId, String SourceId, Func<String, String, CancellationToken, Task> Callback);
+sealed record MergeDeclaration(String MergeId, IReadOnlyList<String> SourceIds);
+sealed record ProcessorDeclaration(String ProcessorId, String StreamId, IReadOnlyList<String> SourceIds, Func<String, String, CancellationToken, Task> Callback);
