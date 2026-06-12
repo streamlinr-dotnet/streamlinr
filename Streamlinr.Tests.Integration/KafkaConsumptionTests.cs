@@ -18,9 +18,9 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
 
         var received = new TaskCompletionSource<StreamRecord<String, String>>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        using var stopRuntime = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+        using var stopStreamlinr = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
 
-        var runTask = StreamlinrApplication.RunAsync(
+        var streamlinrTask = StreamlinrApplication.RunAsync(
             options: new StreamlinrOptions {
                 ApplicationId    = $"streamlinr-smoke-{Guid.NewGuid():N}",
                 BootstrapServers = _kafka.BootstrapServers,
@@ -30,28 +30,27 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
                     .Stream<String, String>(topic)
                     .Peek((record, _) => {
                         if (received.TrySetResult(record))
-                            stopRuntime.Cancel();
+                            stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
                     });
             },
-            cancellationToken: stopRuntime.Token);
+            cancellationToken: stopStreamlinr.Token);
 
-        await Task.Delay(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
         await _kafka.ProduceAsync(topic, ("order-1", "created"), TestContext.Current.CancellationToken);
 
-        var delay = Task.Delay(Timeout.InfiniteTimeSpan, timeout.Token);
-        var completed = await Task.WhenAny(received.Task, runTask, delay);
+        var timeoutTask = Task.Delay(Timeout.InfiniteTimeSpan, timeout.Token);
+        var completedTask = await Task.WhenAny(received.Task, streamlinrTask, timeoutTask);
 
-        if (completed == runTask) {
-            await runTask;
+        if (completedTask == streamlinrTask) {
+            await streamlinrTask;
             Assert.Fail("Streamlinr runtime stopped before receiving the expected record.");
         }
 
-        Assert.Same(received.Task, completed);
+        Assert.Same(received.Task, completedTask);
 
-        await stopRuntime.CancelAsync();
-        await runTask;
+        await stopStreamlinr.CancelAsync();
+        await streamlinrTask;
 
         var record = await received.Task;
         Assert.Equal("order-1", record.Key);
