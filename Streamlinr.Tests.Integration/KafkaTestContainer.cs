@@ -95,6 +95,24 @@ class KafkaTestContainer : IAsyncDisposable {
     public Task ProduceAsync(String topic, (String Key, String Value) message, CancellationToken cancellationToken) =>
         ProduceBatchAsync(topic, [message], cancellationToken);
 
+    public async Task ProduceBytesAsync(String topic, (Byte[] Key, Byte[]? Value) message, MessageHeaders headers, CancellationToken cancellationToken) {
+        ArgumentException.ThrowIfNullOrEmpty(topic);
+        ArgumentNullException.ThrowIfNull(headers);
+
+        using var producer = new ProducerBuilder<Byte[], Byte[]>(new ProducerConfig {
+            BootstrapServers = DirectBootstrapServers,
+            MessageTimeoutMs = 10_000,
+        }).Build();
+
+        await producer.ProduceAsync(topic, new Message<Byte[], Byte[]> {
+            Key = message.Key,
+            Value = message.Value!,
+            Headers = ToKafkaHeaders(headers),
+        }, cancellationToken);
+
+        producer.Flush(TimeSpan.FromSeconds(10));
+    }
+
     public async Task ProduceBatchAsync(String topic, IReadOnlyCollection<(String Key, String Value)> messages, CancellationToken cancellationToken) {
         ArgumentException.ThrowIfNullOrEmpty(topic);
         ArgumentNullException.ThrowIfNull(messages);
@@ -213,6 +231,16 @@ class KafkaTestContainer : IAsyncDisposable {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+
+    static Headers ToKafkaHeaders(MessageHeaders headers) {
+        var kafkaHeaders = new Headers();
+
+        foreach (var header in headers.All) {
+            kafkaHeaders.Add(header.Name, header.Value);
+        }
+
+        return kafkaHeaders;
     }
 
     async Task CreateKafkaProxyAsync(CancellationToken cancellationToken) {

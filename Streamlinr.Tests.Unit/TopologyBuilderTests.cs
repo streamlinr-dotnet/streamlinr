@@ -7,15 +7,32 @@ public sealed class TopologyBuilderTests {
     public void StreamCanDeclarePeekProcessor() {
         var topology = new TopologyBuilder();
 
-        topology.Stream<String, String>("orders")
+        topology.Stream<String>("orders", ValueSerializers.String, StringResolver())
             .Peek((_, _) => ValueTask.CompletedTask);
+    }
+
+    [Fact]
+    public void StreamCanDeclareExplicitSerializers() {
+        var topology = new TopologyBuilder();
+
+        topology.Stream<Int32>("widgets", new Int32Serializer(), new WidgetValueSerializer(), WidgetResolver())
+            .Peek((_, _) => ValueTask.CompletedTask);
+    }
+
+    [Fact]
+    public void StreamCanUseBuiltInKeySerializers() {
+        var topology = new TopologyBuilder();
+
+        topology.Stream<Int32>("widgets-by-int", ValueSerializers.String, StringResolver()).Peek((_, _) => ValueTask.CompletedTask);
+        topology.Stream<Int64>("widgets-by-long", ValueSerializers.String, StringResolver()).Peek((_, _) => ValueTask.CompletedTask);
+        topology.Stream<Guid>("widgets-by-guid", ValueSerializers.String, StringResolver()).Peek((_, _) => ValueTask.CompletedTask);
     }
 
     [Fact]
     public void TopologyCanMergeStreams() {
         var topology = new TopologyBuilder();
-        var orders = topology.Stream<String, String>("orders");
-        var payments = topology.Stream<String, String>("payments");
+        var orders = topology.Stream<String>("orders", ValueSerializers.String, StringResolver());
+        var payments = topology.Stream<String>("payments", ValueSerializers.String, StringResolver());
 
         topology.Merge(orders, payments)
             .Peek((_, _) => ValueTask.CompletedTask);
@@ -27,8 +44,8 @@ public sealed class TopologyBuilderTests {
         var second = new TopologyBuilder();
 
         var error = Assert.Throws<InvalidOperationException>(() => first.Merge(
-            first.Stream<String, String>("orders"),
-            second.Stream<String, String>("payments")
+            first.Stream<String>("orders", ValueSerializers.String, StringResolver()),
+            second.Stream<String>("payments", ValueSerializers.String, StringResolver())
         ));
 
         Assert.Contains("same topology", error.Message);
@@ -40,7 +57,7 @@ public sealed class TopologyBuilderTests {
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => StreamlinrApplication.RunAsync(
             options,
-            topology => topology.Stream<String, String>("orders").Peek((_, _) => ValueTask.CompletedTask),
+            topology => topology.Stream<String>("orders", ValueSerializers.String, StringResolver()).Peek((_, _) => ValueTask.CompletedTask),
             TestContext.Current.CancellationToken
         ));
 
@@ -53,7 +70,7 @@ public sealed class TopologyBuilderTests {
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => StreamlinrApplication.RunAsync(
             options,
-            topology => topology.Stream<String, String>("orders").Peek((_, _) => ValueTask.CompletedTask),
+            topology => topology.Stream<String>("orders", ValueSerializers.String, StringResolver()).Peek((_, _) => ValueTask.CompletedTask),
             TestContext.Current.CancellationToken
         ));
 
@@ -61,35 +78,12 @@ public sealed class TopologyBuilderTests {
     }
 
     [Fact]
-    public async Task InitialRuntimeRejectsNonStringStreams() {
-        var options = new StreamlinrOptions { ApplicationId = "orders-app", BootstrapServers = "localhost:9092" };
+    public void StreamRequiresExplicitSerializerWhenNoDefaultExists() {
+        var topology = new TopologyBuilder();
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => StreamlinrApplication.RunAsync(
-            options,
-            topology => topology.Stream<Int32, String>("orders").Peek((_, _) => ValueTask.CompletedTask),
-            TestContext.Current.CancellationToken
-        ));
+        var error = Assert.Throws<InvalidOperationException>(() => topology.Stream<Decimal>("orders", ValueSerializers.String, StringResolver()));
 
-        Assert.Contains("string keys and string values", error.Message);
-    }
-
-    [Fact]
-    public async Task InitialRuntimeRejectsNonStringMultipleStreams() {
-        var options = new StreamlinrOptions { ApplicationId = "orders-app", BootstrapServers = "localhost:9092" };
-
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => StreamlinrApplication.RunAsync(
-            options,
-            topology => {
-                var orders = topology.Stream<String, String>("orders");
-                var payments = topology.Stream<Int32, String>("payments");
-
-                orders.Peek((_, _) => ValueTask.CompletedTask);
-                payments.Peek((_, _) => ValueTask.CompletedTask);
-            },
-            TestContext.Current.CancellationToken
-        ));
-
-        Assert.Contains("string keys and string values", error.Message);
+        Assert.Contains("default key serializer", error.Message);
     }
 
     [Fact]
@@ -98,10 +92,32 @@ public sealed class TopologyBuilderTests {
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => StreamlinrApplication.RunAsync(
             options,
-            topology => topology.Stream<String, String>("orders"),
+            topology => topology.Stream<String>("orders", ValueSerializers.String, StringResolver()),
             TestContext.Current.CancellationToken
         ));
 
         Assert.Contains("processor", error.Message);
+    }
+
+    sealed record Widget(String Id, String Status);
+
+    static DefaultMessageTypeResolver StringResolver() => new("message-type") {
+        ["string"] = typeof(String),
+    };
+
+    static DefaultMessageTypeResolver WidgetResolver() => new("message-type") {
+        ["widget"] = typeof(Widget),
+    };
+
+    sealed class Int32Serializer : IKeySerializer<Int32> {
+        public Byte[]? Serialize(Int32 value, SerializationContext context) => BitConverter.GetBytes(value);
+
+        public Int32 Deserialize(Byte[]? data, SerializationContext context) => BitConverter.ToInt32(data ?? throw new ArgumentNullException(nameof(data)));
+    }
+
+    sealed class WidgetValueSerializer : IValueSerializer {
+        public Byte[] Serialize(Object value, Type valueType, SerializationContext context) => [];
+
+        public Object Deserialize(Byte[] data, Type valueType, SerializationContext context) => new Widget("widget-1", "created");
     }
 }

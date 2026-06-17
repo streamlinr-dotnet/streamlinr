@@ -15,36 +15,67 @@ public class TopologyBuilder {
     internal IReadOnlyList<ProcessorDeclaration> Processors => _processors;
 
     /// <summary>
+    /// Declares a stream sourced from a Kafka topic using an implicit built-in key serializer.
+    /// </summary>
+    /// <typeparam name="TKey">The record key type.</typeparam>
+    /// <param name="topic">The source topic name.</param>
+    /// <param name="valueSerializer">The message value serializer.</param>
+    /// <param name="messageTypeResolver">The message type resolver.</param>
+    /// <returns>A builder for stream processors.</returns>
+    /// <remarks>
+    /// Values are polymorphic: <paramref name="messageTypeResolver" /> resolves each message value to a CLR type
+    /// before <paramref name="valueSerializer" /> deserializes it. Unknown message types, tombstones, and
+    /// deserialization failures continue through the stream as <see cref="StreamValue" /> cases.
+    /// Built-in key serializers are available for <see cref="String" />, <see cref="Byte" /> arrays,
+    /// <see cref="Int32" />, <see cref="Int64" />, and <see cref="Guid" />. Use the overload that accepts an
+    /// explicit key serializer for any other key type.
+    /// </remarks>
+    public StreamBuilder<TKey> Stream<TKey>(String topic, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver) {
+        var keySerializer = ResolveDefaultKeySerializer<TKey>();
+
+        if (keySerializer is null)
+            throw new InvalidOperationException("No default key serializer is available for the requested stream key type. Provide a key serializer explicitly.");
+
+        return Stream(topic, keySerializer, valueSerializer, messageTypeResolver);
+    }
+
+    /// <summary>
     /// Declares a stream sourced from a Kafka topic.
     /// </summary>
     /// <typeparam name="TKey">The record key type.</typeparam>
-    /// <typeparam name="TValue">The record value type.</typeparam>
     /// <param name="topic">The source topic name.</param>
+    /// <param name="keySerializer">The message key serializer.</param>
+    /// <param name="valueSerializer">The message value serializer.</param>
+    /// <param name="messageTypeResolver">The message type resolver.</param>
     /// <returns>A builder for stream processors.</returns>
-    public StreamBuilder<TKey, TValue> Stream<TKey, TValue>(String topic) {
+    public StreamBuilder<TKey> Stream<TKey>(String topic, IKeySerializer<TKey> keySerializer, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver) {
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
+        ArgumentNullException.ThrowIfNull(keySerializer);
+        ArgumentNullException.ThrowIfNull(valueSerializer);
+        ArgumentNullException.ThrowIfNull(messageTypeResolver);
 
         var source = new SourceDeclaration(
-            SourceId : $"source-{_sources.Count + 1}",
-            Topic    : topic,
-            KeyType  : typeof(TKey),
-            ValueType: typeof(TValue)
+            SourceId           : $"source-{_sources.Count + 1}",
+            Topic              : topic,
+            KeyType            : typeof(TKey),
+            KeySerializer      : keySerializer,
+            ValueSerializer    : valueSerializer,
+            MessageTypeResolver: messageTypeResolver
         );
 
         _sources.Add(source);
 
-        return new StreamBuilder<TKey, TValue>(this, source.SourceId, [source.SourceId]);
+        return new StreamBuilder<TKey>(this, source.SourceId, [source.SourceId]);
     }
 
     /// <summary>
-    /// Merges two streams with the same key and value types into one downstream stream.
+    /// Merges two streams with the same key type into one downstream stream.
     /// </summary>
     /// <typeparam name="TKey">The record key type.</typeparam>
-    /// <typeparam name="TValue">The record value type.</typeparam>
     /// <param name="first">The first stream to merge.</param>
     /// <param name="second">The second stream to merge.</param>
     /// <returns>A builder for processors that observe records from both streams.</returns>
-    public StreamBuilder<TKey, TValue> Merge<TKey, TValue>(StreamBuilder<TKey, TValue> first, StreamBuilder<TKey, TValue> second) {
+    public StreamBuilder<TKey> Merge<TKey>(StreamBuilder<TKey> first, StreamBuilder<TKey> second) {
         ArgumentNullException.ThrowIfNull(first);
         ArgumentNullException.ThrowIfNull(second);
 
@@ -59,18 +90,36 @@ public class TopologyBuilder {
 
         _merges.Add(merge);
 
-        return new StreamBuilder<TKey, TValue>(this, merge.MergeId, sourceIds);
+        return new StreamBuilder<TKey>(this, merge.MergeId, sourceIds);
     }
 
     internal void AddProcessor(ProcessorDeclaration processor) => _processors.Add(processor);
+
+    static IKeySerializer<T>? ResolveDefaultKeySerializer<T>() {
+        if (typeof(T) == typeof(String))
+            return (IKeySerializer<T>)(Object)KeySerializers.String;
+
+        if (typeof(T) == typeof(Byte[]))
+            return (IKeySerializer<T>)(Object)KeySerializers.Bytes;
+
+        if (typeof(T) == typeof(Int32))
+            return (IKeySerializer<T>)(Object)KeySerializers.Int32;
+
+        if (typeof(T) == typeof(Int64))
+            return (IKeySerializer<T>)(Object)KeySerializers.Int64;
+
+        if (typeof(T) == typeof(Guid))
+            return (IKeySerializer<T>)(Object)KeySerializers.Guid;
+
+        return null;
+    }
 }
 
 /// <summary>
 /// Builds processors for a declared stream.
 /// </summary>
 /// <typeparam name="TKey">The record key type.</typeparam>
-/// <typeparam name="TValue">The record value type.</typeparam>
-public sealed class StreamBuilder<TKey, TValue> {
+public sealed class StreamBuilder<TKey> {
     readonly TopologyBuilder _topology;
     readonly String _streamId;
     readonly IReadOnlyList<String> _sourceIds;
@@ -90,20 +139,20 @@ public sealed class StreamBuilder<TKey, TValue> {
     /// </summary>
     /// <param name="callback">The callback to execute for each record.</param>
     /// <returns>The current stream builder.</returns>
-    public StreamBuilder<TKey, TValue> Peek(Func<StreamRecord<TKey, TValue>, CancellationToken, ValueTask> callback) {
+    public StreamBuilder<TKey> Peek(Func<StreamRecord<TKey>, CancellationToken, ValueTask> callback) {
         ArgumentNullException.ThrowIfNull(callback);
 
         _topology.AddProcessor(new ProcessorDeclaration(
             ProcessorId: $"peek-{_topology.Processors.Count + 1}",
             StreamId   : _streamId,
             SourceIds  : _sourceIds,
-            Callback   : (key, value, cancellationToken) => callback(new StreamRecord<TKey, TValue>((TKey)(Object)key, (TValue)(Object)value), cancellationToken).AsTask()
+            Callback   : (key, value, cancellationToken) => callback(new StreamRecord<TKey>((TKey)key, (StreamValue)value), cancellationToken).AsTask()
         ));
 
         return this;
     }
 }
 
-sealed record SourceDeclaration(String SourceId, String Topic, Type KeyType, Type ValueType);
+sealed record SourceDeclaration(String SourceId, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver);
 sealed record MergeDeclaration(String MergeId, IReadOnlyList<String> SourceIds);
-sealed record ProcessorDeclaration(String ProcessorId, String StreamId, IReadOnlyList<String> SourceIds, Func<String, String, CancellationToken, Task> Callback);
+sealed record ProcessorDeclaration(String ProcessorId, String StreamId, IReadOnlyList<String> SourceIds, Func<Object, Object, CancellationToken, Task> Callback);

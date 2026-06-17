@@ -25,7 +25,7 @@ module RuntimeTests =
         let result = Actor.postAndAsyncReply (fun reply -> ProcessBatch(batch, reply)) actor |> Async.StartAsTask |> waitForCompletion
 
         Assert.True(Result.isOk result)
-        Assert.Equal("order-1", (waitForCompletion processed.Task).Key)
+        Assert.Equal("order-1", (waitForCompletion processed.Task).Key :?> string)
 
     [<Fact>]
     let ``processor actor reports callback failure`` () =

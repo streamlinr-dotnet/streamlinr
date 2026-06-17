@@ -5,7 +5,17 @@ open System.Collections.Generic
 open System.Threading
 open System.Threading.Tasks
 
-type internal SourceRecord(topic: string, partition: int, offset: int64, key: string, value: string, timestampUtc: Nullable<DateTimeOffset>) =
+type internal RuntimeHeader(name: string, value: byte array) =
+    member _.Name = name
+    member _.Value = value
+
+type internal RuntimeSerializationContext(topic: string, headers: IReadOnlyList<RuntimeHeader>) =
+    member _.Topic = topic
+    member _.Headers = headers
+
+type internal RuntimeDeserializer = delegate of byte array * RuntimeSerializationContext -> obj
+
+type internal SourceRecord(topic: string, partition: int, offset: int64, key: obj, value: obj, timestampUtc: Nullable<DateTimeOffset>) =
     member _.Topic = topic
     member _.Partition = partition
     member _.Offset = offset
@@ -30,11 +40,12 @@ type internal ProcessorPlan(processorId: string, sourceIds: IReadOnlyList<string
     member _.SourceIds = sourceIds
     member _.Processor = processor
 
-type internal SourcePlan(sourceId: string, topic: string, keyTypeName: string, valueTypeName: string) =
+type internal SourcePlan(sourceId: string, topic: string, keyTypeName: string, keyDeserializer: RuntimeDeserializer, valueDeserializer: RuntimeDeserializer) =
     member _.SourceId = sourceId
     member _.Topic = topic
     member _.KeyTypeName = keyTypeName
-    member _.ValueTypeName = valueTypeName
+    member _.KeyDeserializer = keyDeserializer
+    member _.ValueDeserializer = valueDeserializer
 
 type internal TopologyPlan(topologyName: string, sources: IReadOnlyList<SourcePlan>, processors: IReadOnlyList<ProcessorPlan>) =
     member _.TopologyName = topologyName
@@ -97,7 +108,7 @@ type internal TopologyMessage =
     | GetTopologyStatus of AsyncReplyChannel<TopologyStatus>
 
 type internal KafkaConsumerMessage =
-    | StartConsuming of ConsumerPlan * target: Actor<TopologyMessage> * AsyncReplyChannel<Result<unit, ConsumerStartError>>
+    | StartConsuming of ConsumerPlan * SourcePlan * target: Actor<TopologyMessage> * AsyncReplyChannel<Result<unit, ConsumerStartError>>
     | Poll
     | StopConsuming of AsyncReplyChannel<unit>
 
@@ -139,13 +150,25 @@ module internal KafkaConsumerActor =
         else
             Nullable(DateTimeOffset(timestamp.UtcDateTime))
 
-    let private toSourceRecord (result: Confluent.Kafka.ConsumeResult<string, string>) =
+    let private toRuntimeHeaders (headers: Confluent.Kafka.Headers) =
+        if isNull (box headers) then
+            Array.empty<RuntimeHeader> :> IReadOnlyList<RuntimeHeader>
+        else
+            headers
+            |> Seq.map (fun header -> RuntimeHeader(header.Key, header.GetValueBytes()))
+            |> Seq.toArray
+            :> IReadOnlyList<RuntimeHeader>
+
+    let private toSourceRecord (source: SourcePlan) (result: Confluent.Kafka.ConsumeResult<byte array, byte array>) =
+        let headers = toRuntimeHeaders result.Message.Headers
+        let context = RuntimeSerializationContext(result.Topic, headers)
+
         SourceRecord(
             result.Topic,
             result.Partition.Value,
             result.Offset.Value,
-            result.Message.Key,
-            result.Message.Value,
+            source.KeyDeserializer.Invoke(result.Message.Key, context),
+            source.ValueDeserializer.Invoke(result.Message.Value, context),
             toTimestampUtc result.Message.Timestamp)
 
     let private buildConsumer (plan: ConsumerPlan) =
@@ -156,9 +179,9 @@ module internal KafkaConsumerActor =
                 AutoOffsetReset = Confluent.Kafka.AutoOffsetReset.Earliest,
                 EnableAutoCommit = true)
 
-        Confluent.Kafka.ConsumerBuilder<string, string>(config).Build()
+        Confluent.Kafka.ConsumerBuilder<byte array, byte array>(config).Build()
 
-    let private tryCollectBatch (consumer: Confluent.Kafka.IConsumer<string, string>) (plan: ConsumerPlan) =
+    let private tryCollectBatch (consumer: Confluent.Kafka.IConsumer<byte array, byte array>) (plan: ConsumerPlan) (source: SourcePlan) =
         try
             let records = ResizeArray<SourceRecord>()
             let mutable keepPolling = true
@@ -171,7 +194,7 @@ module internal KafkaConsumerActor =
                 elif result.IsPartitionEOF then
                     keepPolling <- false
                 else
-                    records.Add(toSourceRecord result)
+                    records.Add(toSourceRecord source result)
 
                     if plan.MaxBatchSize = 1 then
                         keepPolling <- false
@@ -186,13 +209,13 @@ module internal KafkaConsumerActor =
     let start () =
         let rec notStarted = Behaviour(fun (context: ActorContext<KafkaConsumerMessage>) ->
             match context.Message with
-            | StartConsuming (plan, target, reply) ->
+            | StartConsuming (plan, source, target, reply) ->
                 try
                     let consumer = buildConsumer plan
                     consumer.Subscribe plan.Topic
                     reply.Reply(Ok())
                     Actor.post Poll context.Self
-                    Become(running plan target consumer)
+                    Become(running plan source target consumer)
                 with error ->
                     reply.Reply(Error { Message = error.Message })
                     Terminate
@@ -201,10 +224,10 @@ module internal KafkaConsumerActor =
                 Terminate
             | _ -> Unhandled)
 
-        and running plan target consumer = Behaviour (fun (context: ActorContext<KafkaConsumerMessage>) ->
+        and running plan source target consumer = Behaviour (fun (context: ActorContext<KafkaConsumerMessage>) ->
             match context.Message with
             | Poll ->
-                match tryCollectBatch consumer plan with
+                match tryCollectBatch consumer plan source with
                 | Ok (Some batch) ->
                     Actor.post (SourceBatchReceived batch) target
                     Actor.post Poll context.Self
@@ -263,7 +286,7 @@ module internal TopologyActor =
                         if startError.IsNone then
                             let consumer = KafkaConsumerActor.start ()
                             let consumerPlan = ConsumerPlan(runtimePlan.ApplicationId, runtimePlan.BootstrapServers, source.Topic, runtimePlan.ApplicationId, source.SourceId, 1, TimeSpan.FromMilliseconds 100.0)
-                            let started = Actor.postAndAsyncReply (fun channel -> StartConsuming(consumerPlan, context.Self, channel)) consumer |> Async.RunSynchronously
+                            let started = Actor.postAndAsyncReply (fun channel -> StartConsuming(consumerPlan, source, context.Self, channel)) consumer |> Async.RunSynchronously
 
                             match started with
                             | Ok () -> consumers.Add consumer

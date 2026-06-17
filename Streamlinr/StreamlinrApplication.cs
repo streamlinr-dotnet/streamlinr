@@ -1,5 +1,7 @@
 namespace Streamlinr;
 
+using System.Reflection;
+
 /// <summary>
 /// Starts Streamlinr topologies using the initial explicit lifecycle API.
 /// </summary>
@@ -35,15 +37,13 @@ static public class StreamlinrApplication {
         if (topology.Processors.Count == 0)
             throw new InvalidOperationException("At least one processor is required.");
 
-        if (topology.Sources.Any(source => source.KeyType != typeof(String) || source.ValueType != typeof(String)))
-            throw new InvalidOperationException("The initial runtime supports only string keys and string values.");
-
         var sourcePlans = topology.Sources
             .Select(source => new SourcePlan(
                 source.SourceId,
                 source.Topic,
                 source.KeyType.FullName ?? source.KeyType.Name,
-                source.ValueType.FullName ?? source.ValueType.Name
+                CreateKeyDeserializer(source.KeyType, source.KeySerializer),
+                CreateValueDeserializer(source.ValueSerializer, source.MessageTypeResolver)
             ))
             .ToArray();
 
@@ -58,5 +58,44 @@ static public class StreamlinrApplication {
         var topologyPlan = new TopologyPlan("default", sourcePlans, processorPlans);
 
         return new RuntimePlan(options.ApplicationId, options.BootstrapServers, [topologyPlan]);
+    }
+
+    static RuntimeDeserializer CreateKeyDeserializer(Type valueType, Object serializer) {
+        var method = typeof(StreamlinrApplication)
+            .GetMethod(nameof(CreateKeyDeserializerCore), BindingFlags.NonPublic | BindingFlags.Static)!
+            .MakeGenericMethod(valueType);
+
+        return (RuntimeDeserializer)method.Invoke(null, [serializer])!;
+    }
+
+    static RuntimeDeserializer CreateKeyDeserializerCore<T>(IKeySerializer<T> serializer) =>
+        new RuntimeDeserializer((data, context) => {
+            var headers              = new MessageHeaders(context.Headers.Select(header => (header.Name, header.Value)));
+            var serializationContext = new SerializationContext(context.Topic, headers);
+
+            return serializer.Deserialize(data, serializationContext)!;
+        });
+
+    static RuntimeDeserializer CreateValueDeserializer(IValueSerializer serializer, IMessageTypeResolver messageTypeResolver) =>
+        new RuntimeDeserializer((data, context) => {
+            var headers              = new MessageHeaders(context.Headers.Select(header => (header.Name, header.Value)));
+            var serializationContext = new SerializationContext(context.Topic, headers);
+
+            if (data is null) return new StreamValue.Tombstone();
+
+            return messageTypeResolver.ResolveType(serializationContext) switch {
+                MessageTypeResolution.Resolved resolved => DeserializeValue(serializer, data, resolved.Type, serializationContext, headers),
+                MessageTypeResolution.Unresolved unresolved => new StreamValue.Unresolved(data, unresolved.Reason, headers),
+                _ => new StreamValue.Unresolved(data, "Message type resolver returned an unsupported resolution result.", headers),
+            };
+        });
+
+    static StreamValue DeserializeValue(IValueSerializer serializer, Byte[] data, Type valueType, SerializationContext context, MessageHeaders headers) {
+        try {
+            return new StreamValue.Resolved(serializer.Deserialize(data, valueType, context), valueType);
+        }
+        catch (Exception error) {
+            return new StreamValue.DeserializationFailed(data, valueType, error, headers);
+        }
     }
 }
