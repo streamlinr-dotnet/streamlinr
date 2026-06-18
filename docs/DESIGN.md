@@ -73,32 +73,52 @@ The C# API should expose Streamlinr-owned configuration and error types. Interna
 
 Integration tests may use `Confluent.Kafka` directly for setup or verification when the public API is not sufficient. Product code outside `Streamlinr.Core` should not.
 
+## Serialization And Message Values
+
+Kafka topics often contain more than one logical message type. Streamlinr should model that directly instead of assuming every record on a stream has the same CLR value type. A stream is keyed by `TKey`, but its value is represented by a result-like `StreamValue` case that preserves what happened while interpreting the Kafka record.
+
+Key serialization and value serialization are separate public concepts. Key serializers are typed because Kafka keys are usually simple scalar values used for partitioning, grouping, and joins. Value serializers are non-generic and deserialize using a resolved CLR `Type`, because the value type may vary from record to record within the same topic.
+
+Message type resolution is explicit and metadata-driven. The default resolver may use headers such as `message-type`, but the public API should expose only Streamlinr-owned concepts: `IMessageTypeResolver`, `MessageTypeResolution`, `MessageHeaders`, key serializers, and value serializers. `Confluent.Kafka` headers and serializer types must remain behind the runtime boundary.
+
+`StreamValue` should distinguish at least these cases:
+
+- `Resolved`: the message type was resolved and deserialization succeeded.
+- `Tombstone`: the Kafka value was null.
+- `Unresolved`: value bytes existed, but no message type could be resolved.
+- `DeserializationFailed`: the message type was resolved, but deserialization failed.
+
+Unknown message types and deserialization failures are data, not fatal runtime errors. They remain in the stream as explicit `StreamValue` cases so future split, tee, and dead-letter processors can route them deliberately.
+
+This is intentionally different from exception-driven stream processing. Exceptions are still appropriate for programmer errors, invalid serializer configuration, duplicate type mappings, or other cases where startup or topology construction is wrong. Unknown message types, tombstones, and malformed payloads are ordinary Kafka stream conditions. The runtime should keep them observable and routable instead of crashing the application by default.
+
 ## Public Programming Model
 
 Application developers should work with a small set of concepts:
 
-- `Stream<TKey, TValue>` for unbounded keyed event streams.
+- Keyed streams whose values are represented by `StreamValue`.
 - `Table<TKey, TValue>` for materialized latest-value views.
 - `Topology` for the processing graph.
 - `Processor` as a user-visible processing concept, not an actor abstraction.
 - `StateStore` for named local state backed by Kafka recovery mechanisms.
 - `Window` for event-time grouping.
-- `Serde` for explicit serialization boundaries.
+- Key serializers, value serializers, and message type resolvers for explicit serialization boundaries.
 
 An early API could look like this:
 
 ```csharp
 builder.Services.AddStreamlinr(streams =>
 {
-    streams.Stream<OrderId, Order>("orders")
-        .Where(order => order.Total > 0)
-        .GroupBy(order => order.CustomerId)
-        .WindowBy(TumblingWindow.OfMinutes(5))
-        .Aggregate(
-            seed: () => new CustomerOrderSummary(),
-            aggregate: (summary, order) => summary.Add(order),
-            store: StateStores.KeyValue<CustomerId, CustomerOrderSummary>("customer-order-summaries"))
-        .To("customer-order-summary");
+    var resolver = new DefaultMessageTypeResolver("message-type") {
+        ["widget"] = typeof(Widget)
+    };
+
+    streams.Stream<String>("widgets", WidgetValueSerializer.Instance, resolver)
+        .Peek(async (record, cancellationToken) => {
+            if (record.Value is StreamValue.Resolved { Value: Widget widget }) {
+                await Console.Out.WriteLineAsync(widget.Name, cancellationToken);
+            }
+        });
 });
 ```
 
@@ -290,7 +310,6 @@ docs/
 
 ## Open Questions
 
-- Should the first public API expose `Stream<TKey, TValue>` immediately, or start with a lower-level processor/topology API?
 - Is exactly-once a v1 goal or a post-v1 feature?
 - Which local store should be used first, given that persistent volumes are optional?
 - How much LINQ syntax should be supported versus stream-specific fluent operators?
