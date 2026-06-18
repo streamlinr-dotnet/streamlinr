@@ -43,16 +43,19 @@ static public class StreamlinrApplication {
                 source.Topic,
                 source.KeyType.FullName ?? source.KeyType.Name,
                 CreateKeyDeserializer(source.KeyType, source.KeySerializer),
-                CreateValueDeserializer(source.ValueSerializer, source.MessageTypeResolver)
+                CreateValueDeserializer(source.ValueSerializer, source.MessageTypeResolver, source.Failure)
             ))
             .ToArray();
 
         var processorPlans = topology.Processors
-            .Select(processor => new ProcessorPlan(
-                processor.ProcessorId,
-                processor.SourceIds.ToArray(),
-                (record, token) => processor.Callback(record.Key, record.Value, token))
-            )
+            .Select(processor => {
+                ValidateProcessorFailure(processor.Failure);
+
+                return new ProcessorPlan(
+                    processor.ProcessorId,
+                    processor.SourceIds.ToArray(),
+                    (record, token) => processor.Callback(record.Key, record.Value, token));
+            })
             .ToArray();
 
         var topologyPlan = new TopologyPlan("default", sourcePlans, processorPlans);
@@ -76,8 +79,16 @@ static public class StreamlinrApplication {
             return serializer.Deserialize(data, serializationContext)!;
         });
 
-    static RuntimeDeserializer CreateValueDeserializer(IValueSerializer serializer, IMessageTypeResolver messageTypeResolver) =>
-        new RuntimeDeserializer((data, context) => {
+    static void ValidateProcessorFailure(ProcessorFailure failure) {
+        if (failure is not ProcessorFailure.FailTopologyPolicy)
+            throw new InvalidOperationException("The requested processor failure policy is not supported by this runtime.");
+    }
+
+    static RuntimeDeserializer CreateValueDeserializer(IValueSerializer serializer, IMessageTypeResolver messageTypeResolver, ValueFailure failure) {
+        if (failure is not ValueFailure.ContinueAsDeadLetterPolicy)
+            throw new InvalidOperationException("The requested value failure policy is not supported by this runtime.");
+
+        return new RuntimeDeserializer((data, context) => {
             var headers              = new MessageHeaders(context.Headers.Select(header => (header.Name, header.Value)));
             var serializationContext = new SerializationContext(context.Topic, headers);
 
@@ -85,17 +96,18 @@ static public class StreamlinrApplication {
 
             return messageTypeResolver.ResolveType(serializationContext) switch {
                 MessageTypeResolution.Resolved resolved => DeserializeValue(serializer, data, resolved.Type, serializationContext, headers),
-                MessageTypeResolution.Unresolved unresolved => new StreamValue.Unresolved(data, unresolved.Reason, headers),
-                _ => new StreamValue.Unresolved(data, "Message type resolver returned an unsupported resolution result.", headers),
+                MessageTypeResolution.Unresolved unresolved => new StreamValue.DeadLetter(null, data, unresolved.Reason, null, headers),
+                _ => new StreamValue.DeadLetter(null, data, "Message type resolver returned an unsupported resolution result.", null, headers),
             };
         });
+    }
 
     static StreamValue DeserializeValue(IValueSerializer serializer, Byte[] data, Type valueType, SerializationContext context, MessageHeaders headers) {
         try {
             return new StreamValue.Resolved(serializer.Deserialize(data, valueType, context), valueType);
         }
         catch (Exception error) {
-            return new StreamValue.DeserializationFailed(data, valueType, error, headers);
+            return new StreamValue.DeadLetter(null, data, $"Failed to deserialize value as CLR type '{valueType.FullName}'.", error, headers);
         }
     }
 }

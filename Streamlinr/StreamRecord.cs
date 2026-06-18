@@ -23,19 +23,12 @@ public abstract record StreamValue {
     public sealed record Tombstone : StreamValue;
 
     /// <summary>
-    /// The message value bytes were present, but no CLR type could be resolved.
+    /// Value processing failed at a boundary configured to continue as dead-letter data.
     /// </summary>
-    /// <param name="Data">The raw message value bytes.</param>
-    /// <param name="Reason">The reason type resolution failed.</param>
+    /// <param name="KeyData">The original key data when available.</param>
+    /// <param name="ValueData">The failed value data.</param>
+    /// <param name="Reason">The reason the value was dead-lettered.</param>
+    /// <param name="Error">The failure error when available.</param>
     /// <param name="Headers">The message headers.</param>
-    public sealed record Unresolved(Byte[] Data, String Reason, MessageHeaders Headers) : StreamValue;
-
-    /// <summary>
-    /// The message value type was resolved, but deserialization failed.
-    /// </summary>
-    /// <param name="Data">The raw message value bytes.</param>
-    /// <param name="Type">The resolved CLR value type.</param>
-    /// <param name="Error">The deserialization error.</param>
-    /// <param name="Headers">The message headers.</param>
-    public sealed record DeserializationFailed(Byte[] Data, Type Type, Exception Error, MessageHeaders Headers) : StreamValue;
+    public sealed record DeadLetter(Object? KeyData, Object? ValueData, String Reason, Exception? Error, MessageHeaders Headers) : StreamValue;
 }

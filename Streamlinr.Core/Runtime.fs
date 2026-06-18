@@ -325,11 +325,15 @@ module internal TopologyActor =
 
                 Handled
             | SourceFailed (topic, error) ->
+                stopConsumers consumers
+                stopProcessors processors
                 Actor.post (ChildFailed($"source:{topic}", error)) supervisor
-                Become(failed error.Message processors consumers)
+                Become(failed error.Message)
             | ProcessorFailed (processorId, error) ->
+                stopConsumers consumers
+                stopProcessors processors
                 Actor.post (ChildFailed($"processor:{processorId}", error)) supervisor
-                Become(failed error.Message processors consumers)
+                Become(failed error.Message)
             | StopTopology reply ->
                 stopConsumers consumers
                 stopProcessors processors
@@ -341,12 +345,9 @@ module internal TopologyActor =
                 Handled
             | _ -> Unhandled)
 
-        and failed message processors consumers = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
+        and failed message = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
             match context.Message with
             | StopTopology reply ->
-                stopConsumers consumers
-                stopProcessors processors
-
                 reply.Reply()
                 Terminate
             | GetTopologyStatus reply ->

@@ -21,6 +21,7 @@ public class TopologyBuilder {
     /// <param name="topic">The source topic name.</param>
     /// <param name="valueSerializer">The message value serializer.</param>
     /// <param name="messageTypeResolver">The message type resolver.</param>
+    /// <param name="failure">The value failure behavior.</param>
     /// <returns>A builder for stream processors.</returns>
     /// <remarks>
     /// Values are polymorphic: <paramref name="messageTypeResolver" /> resolves each message value to a CLR type
@@ -30,13 +31,13 @@ public class TopologyBuilder {
     /// <see cref="Int32" />, <see cref="Int64" />, and <see cref="Guid" />. Use the overload that accepts an
     /// explicit key serializer for any other key type.
     /// </remarks>
-    public StreamBuilder<TKey> Stream<TKey>(String topic, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver) {
+    public StreamBuilder<TKey> Stream<TKey>(String topic, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver, ValueFailure failure) {
         var keySerializer = ResolveDefaultKeySerializer<TKey>();
 
         if (keySerializer is null)
             throw new InvalidOperationException("No default key serializer is available for the requested stream key type. Provide a key serializer explicitly.");
 
-        return Stream(topic, keySerializer, valueSerializer, messageTypeResolver);
+        return Stream(topic, keySerializer, valueSerializer, messageTypeResolver, failure);
     }
 
     /// <summary>
@@ -47,12 +48,14 @@ public class TopologyBuilder {
     /// <param name="keySerializer">The message key serializer.</param>
     /// <param name="valueSerializer">The message value serializer.</param>
     /// <param name="messageTypeResolver">The message type resolver.</param>
+    /// <param name="failure">The value failure behavior.</param>
     /// <returns>A builder for stream processors.</returns>
-    public StreamBuilder<TKey> Stream<TKey>(String topic, IKeySerializer<TKey> keySerializer, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver) {
+    public StreamBuilder<TKey> Stream<TKey>(String topic, IKeySerializer<TKey> keySerializer, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver, ValueFailure failure) {
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
         ArgumentNullException.ThrowIfNull(keySerializer);
         ArgumentNullException.ThrowIfNull(valueSerializer);
         ArgumentNullException.ThrowIfNull(messageTypeResolver);
+        ArgumentNullException.ThrowIfNull(failure);
 
         var source = new SourceDeclaration(
             SourceId           : $"source-{_sources.Count + 1}",
@@ -60,7 +63,8 @@ public class TopologyBuilder {
             KeyType            : typeof(TKey),
             KeySerializer      : keySerializer,
             ValueSerializer    : valueSerializer,
-            MessageTypeResolver: messageTypeResolver
+            MessageTypeResolver: messageTypeResolver,
+            Failure            : failure
         );
 
         _sources.Add(source);
@@ -138,21 +142,24 @@ public sealed class StreamBuilder<TKey> {
     /// Executes a side-effect callback for each record observed on the stream.
     /// </summary>
     /// <param name="callback">The callback to execute for each record.</param>
+    /// <param name="failure">The processor failure behavior.</param>
     /// <returns>The current stream builder.</returns>
-    public StreamBuilder<TKey> Peek(Func<StreamRecord<TKey>, CancellationToken, ValueTask> callback) {
+    public StreamBuilder<TKey> Peek(Func<StreamRecord<TKey>, CancellationToken, ValueTask> callback, ProcessorFailure failure) {
         ArgumentNullException.ThrowIfNull(callback);
+        ArgumentNullException.ThrowIfNull(failure);
 
         _topology.AddProcessor(new ProcessorDeclaration(
             ProcessorId: $"peek-{_topology.Processors.Count + 1}",
             StreamId   : _streamId,
             SourceIds  : _sourceIds,
-            Callback   : (key, value, cancellationToken) => callback(new StreamRecord<TKey>((TKey)key, (StreamValue)value), cancellationToken).AsTask()
+            Callback   : (key, value, cancellationToken) => callback(new StreamRecord<TKey>((TKey)key, (StreamValue)value), cancellationToken).AsTask(),
+            Failure    : failure
         ));
 
         return this;
     }
 }
 
-sealed record SourceDeclaration(String SourceId, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver);
+sealed record SourceDeclaration(String SourceId, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver, ValueFailure Failure);
 sealed record MergeDeclaration(String MergeId, IReadOnlyList<String> SourceIds);
-sealed record ProcessorDeclaration(String ProcessorId, String StreamId, IReadOnlyList<String> SourceIds, Func<Object, Object, CancellationToken, Task> Callback);
+sealed record ProcessorDeclaration(String ProcessorId, String StreamId, IReadOnlyList<String> SourceIds, Func<Object, Object, CancellationToken, Task> Callback, ProcessorFailure Failure);

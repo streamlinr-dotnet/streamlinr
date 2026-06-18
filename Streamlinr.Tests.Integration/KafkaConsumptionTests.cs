@@ -1,7 +1,8 @@
 namespace Streamlinr;
 
-using System.Text;
 using Xunit;
+
+using static System.Text.Encoding;
 
 public sealed class KafkaConsumptionTests : IAsyncLifetime {
     readonly KafkaTestContainer _kafka = new KafkaTestContainer();
@@ -28,13 +29,13 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
             },
             configureTopology: topology => {
                 topology
-                    .Stream<String>(topic, ValueSerializers.String, StringResolver())
+                    .Stream<String>(topic, ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter())
                     .Peek((record, _) => {
                         if (received.TrySetResult(record))
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    });
+                    }, ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -78,8 +79,8 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
                 BootstrapServers = _kafka.BootstrapServers,
             },
             configureTopology: topology => {
-                var sourceA = topology.Stream<String>(topicA, ValueSerializers.String, StringResolver());
-                var sourceB = topology.Stream<String>(topicB, ValueSerializers.String, StringResolver());
+                var sourceA = topology.Stream<String>(topicA, ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter());
+                var sourceB = topology.Stream<String>(topicB, ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter());
 
                 topology
                     .Merge(sourceA, sourceB)
@@ -94,7 +95,7 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
                         }
 
                         return ValueTask.CompletedTask;
-                    });
+                    }, ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -135,22 +136,23 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
             },
             configureTopology: topology => {
                 topology
-                    .Stream<String>(topic, valueSerializer: new WidgetValueSerializer(), messageTypeResolver: WidgetResolver())
+                    .Stream<String>(topic, valueSerializer: new WidgetValueSerializer(), messageTypeResolver: WidgetResolver(), failure: ValueFailure.ContinueAsDeadLetter())
                     .Peek((record, _) => {
                         if (received.TrySetResult(record))
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    });
+                    }, ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
-        var headers = new MessageHeaders();
-        headers.Add("message-type", Encoding.UTF8.GetBytes("widget"));
+        var headers = new MessageHeaders {
+            { "message-type", "widget"u8.ToArray() },
+        };
 
         await _kafka.ProduceBytesAsync(
             topic,
-            (Encoding.UTF8.GetBytes("widget-1"), Encoding.UTF8.GetBytes("widget-1:created")),
+            ("widget-1"u8.ToArray(), "widget-1:created"u8.ToArray()),
             headers,
             TestContext.Current.CancellationToken);
 
@@ -175,7 +177,7 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
     }
 
     [Fact]
-    public async Task UnknownMessageTypeFlowsAsUnresolvedValue() {
+    public async Task UnknownMessageTypeFlowsAsDeadLetterValue() {
         var topic = $"streamlinr-unknown-{Guid.NewGuid():N}";
         await _kafka.CreateTopicAsync(topic, TestContext.Current.CancellationToken);
 
@@ -190,25 +192,27 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
             },
             configureTopology: topology => {
                 topology
-                    .Stream<String>(topic, new WidgetValueSerializer(), WidgetResolver())
+                    .Stream<String>(topic, new WidgetValueSerializer(), WidgetResolver(), ValueFailure.ContinueAsDeadLetter())
                     .Peek((record, _) => {
                         if (received.TrySetResult(record))
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    });
+                    }, ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
-        var headers = new MessageHeaders().Add("message-type", Encoding.UTF8.GetBytes("unknown"));
-        await _kafka.ProduceBytesAsync(topic, (Encoding.UTF8.GetBytes("widget-1"), Encoding.UTF8.GetBytes("widget-1:created")), headers, TestContext.Current.CancellationToken);
+        var headers = new MessageHeaders {
+            { "message-type", "unknown"u8.ToArray() },
+        };
+        await _kafka.ProduceBytesAsync(topic, ("widget-1"u8.ToArray(), "widget-1:created"u8.ToArray()), headers, TestContext.Current.CancellationToken);
 
         var timeoutTask = Task.Delay(Timeout.InfiniteTimeSpan, timeout.Token);
         var completedTask = await Task.WhenAny(received.Task, streamlinrTask, timeoutTask);
 
         if (completedTask == streamlinrTask) {
             await streamlinrTask;
-            Assert.Fail("Streamlinr runtime stopped before receiving the unresolved record.");
+            Assert.Fail("Streamlinr runtime stopped before receiving the dead-letter record.");
         }
 
         Assert.Same(received.Task, completedTask);
@@ -218,8 +222,10 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
 
         var record = await received.Task;
         Assert.Equal("widget-1", record.Key);
-        var value = Assert.IsType<StreamValue.Unresolved>(record.Value);
+        var value = Assert.IsType<StreamValue.DeadLetter>(record.Value);
         Assert.Contains("not mapped", value.Reason);
+        Assert.IsType<Byte[]>(value.ValueData);
+        Assert.Null(value.Error);
     }
 
     [Fact]
@@ -238,19 +244,19 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
             },
             configureTopology: topology => {
                 topology
-                    .Stream<String>(topic, new WidgetValueSerializer(), WidgetResolver())
+                    .Stream<String>(topic, new WidgetValueSerializer(), WidgetResolver(), ValueFailure.ContinueAsDeadLetter())
                     .Peek((record, _) => {
                         if (received.TrySetResult(record))
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    });
+                    }, ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
         await _kafka.ProduceBytesAsync(
             topic,
-            (Encoding.UTF8.GetBytes("widget-1"), null),
+            ("widget-1"u8.ToArray(), null),
             new MessageHeaders(),
             TestContext.Current.CancellationToken);
 
@@ -273,7 +279,7 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
     }
 
     [Fact]
-    public async Task BadPayloadFlowsAsDeserializationFailedValue() {
+    public async Task BadPayloadFlowsAsDeadLetterValue() {
         var topic = $"streamlinr-bad-payload-{Guid.NewGuid():N}";
         await _kafka.CreateTopicAsync(topic, TestContext.Current.CancellationToken);
 
@@ -288,25 +294,25 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
             },
             configureTopology: topology => {
                 topology
-                    .Stream<String>(topic, new WidgetValueSerializer(), WidgetResolver())
+                    .Stream<String>(topic, new WidgetValueSerializer(), WidgetResolver(), ValueFailure.ContinueAsDeadLetter())
                     .Peek((record, _) => {
                         if (received.TrySetResult(record))
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    });
+                    }, ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
-        var headers = new MessageHeaders().Add("message-type", Encoding.UTF8.GetBytes("widget"));
-        await _kafka.ProduceBytesAsync(topic, (Encoding.UTF8.GetBytes("widget-1"), Encoding.UTF8.GetBytes("not-a-widget")), headers, TestContext.Current.CancellationToken);
+        var headers = new MessageHeaders().Add("message-type", "widget"u8.ToArray());
+        await _kafka.ProduceBytesAsync(topic, ("widget-1"u8.ToArray(), "not-a-widget"u8.ToArray()), headers, TestContext.Current.CancellationToken);
 
         var timeoutTask = Task.Delay(Timeout.InfiniteTimeSpan, timeout.Token);
         var completedTask = await Task.WhenAny(received.Task, streamlinrTask, timeoutTask);
 
         if (completedTask == streamlinrTask) {
             await streamlinrTask;
-            Assert.Fail("Streamlinr runtime stopped before receiving the deserialization failure record.");
+            Assert.Fail("Streamlinr runtime stopped before receiving the dead-letter record.");
         }
 
         Assert.Same(received.Task, completedTask);
@@ -316,27 +322,67 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
 
         var record = await received.Task;
         Assert.Equal("widget-1", record.Key);
-        var value = Assert.IsType<StreamValue.DeserializationFailed>(record.Value);
-        Assert.Equal(typeof(Widget), value.Type);
+        var value = Assert.IsType<StreamValue.DeadLetter>(record.Value);
+        Assert.IsType<Byte[]>(value.ValueData);
+        Assert.Contains(typeof(Widget).FullName!, value.Reason);
         Assert.IsType<InvalidOperationException>(value.Error);
+    }
+
+    [Fact]
+    public async Task PeekCallbackExceptionFailsTopology() {
+        var topic = $"streamlinr-processor-failure-{Guid.NewGuid():N}";
+        await _kafka.CreateTopicAsync(topic, TestContext.Current.CancellationToken);
+
+        var processorStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var stopStreamlinr = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+
+        var streamlinrTask = StreamlinrApplication.RunAsync(
+            options: new StreamlinrOptions {
+                ApplicationId    = $"streamlinr-processor-failure-{Guid.NewGuid():N}",
+                BootstrapServers = _kafka.BootstrapServers,
+            },
+            configureTopology: topology => {
+                topology
+                    .Stream<String>(topic, ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter())
+                    .Peek((_, _) => {
+                        processorStarted.TrySetResult();
+                        throw new InvalidOperationException("processor failed");
+                    }, ProcessorFailure.FailTopology());
+            },
+            cancellationToken: stopStreamlinr.Token);
+
+        await ProduceStringAsync(topic, "message-1", "value-1", TestContext.Current.CancellationToken);
+
+        var timeoutTask = Task.Delay(Timeout.InfiniteTimeSpan, timeout.Token);
+        var completedTask = await Task.WhenAny(streamlinrTask, timeoutTask);
+
+        if (completedTask != streamlinrTask) {
+            await stopStreamlinr.CancelAsync();
+            Assert.Fail("Streamlinr runtime did not stop after the processor failed.");
+        }
+
+        await processorStarted.Task;
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () => await streamlinrTask);
+        Assert.Equal("processor failed", error.Message);
     }
 
     sealed record Widget(String Id, String Status);
 
-    static DefaultMessageTypeResolver StringResolver() => new("message-type") {
+    static DefaultMessageTypeResolver StringResolver() => new DefaultMessageTypeResolver("message-type") {
         ["string"] = typeof(String),
     };
 
-    static DefaultMessageTypeResolver WidgetResolver() => new("message-type") {
+    static DefaultMessageTypeResolver WidgetResolver() => new DefaultMessageTypeResolver("message-type") {
         ["widget"] = typeof(Widget),
     };
 
     Task ProduceStringAsync(String topic, String key, String value, CancellationToken cancellationToken) {
-        var headers = new MessageHeaders().Add("message-type", Encoding.UTF8.GetBytes("string"));
+        var headers = new MessageHeaders().Add("message-type", "string"u8.ToArray());
 
         return _kafka.ProduceBytesAsync(
             topic,
-            (Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes(value)),
+            (UTF8.GetBytes(key), UTF8.GetBytes(value)),
             headers,
             cancellationToken);
     }
@@ -344,16 +390,16 @@ public sealed class KafkaConsumptionTests : IAsyncLifetime {
     sealed class WidgetValueSerializer : IValueSerializer {
         public Byte[] Serialize(Object value, Type valueType, SerializationContext context) {
             var widget = Assert.IsType<Widget>(value);
-            context.Headers.Add("message-type", Encoding.UTF8.GetBytes("widget"));
-            return Encoding.UTF8.GetBytes($"{widget.Id}:{widget.Status}");
+            context.Headers.Add("message-type", "widget"u8.ToArray());
+            return UTF8.GetBytes($"{widget.Id}:{widget.Status}");
         }
 
         public Object Deserialize(Byte[] data, Type valueType, SerializationContext context) {
             Assert.Equal(typeof(Widget), valueType);
             Assert.True(context.Headers.TryGetLast("message-type", out var messageType));
-            Assert.Equal("widget", Encoding.UTF8.GetString(messageType));
+            Assert.Equal("widget", UTF8.GetString(messageType));
 
-            var parts = Encoding.UTF8.GetString(data).Split(':');
+            var parts = UTF8.GetString(data).Split(':');
             if (parts.Length != 2)
                 throw new InvalidOperationException("Widget payload must contain id and status.");
 

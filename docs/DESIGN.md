@@ -81,16 +81,27 @@ Key serialization and value serialization are separate public concepts. Key seri
 
 Message type resolution is explicit and metadata-driven. The default resolver may use headers such as `message-type`, but the public API should expose only Streamlinr-owned concepts: `IMessageTypeResolver`, `MessageTypeResolution`, `MessageHeaders`, key serializers, and value serializers. `Confluent.Kafka` headers and serializer types must remain behind the runtime boundary.
 
+Failures at runtime boundaries are explicit policy decisions. Serializer failures and processor failures must declare their behavior at the boundary where the programmer has the relevant domain context.
+
+The first implemented value failure policy is `ValueFailure.ContinueAsDeadLetter()`. It keeps the record in the stream as `StreamValue.DeadLetter` so later processors can inspect, split, route, or eventually write it to a dead-letter topic. This does not mean Streamlinr immediately writes to a Kafka dead-letter topic. It means the failure is represented as stream data. Future value failure policies may include skip, pause partition, fail topology, and external dead-letter output where those behaviors are well defined.
+
 `StreamValue` should distinguish at least these cases:
 
 - `Resolved`: the message type was resolved and deserialization succeeded.
 - `Tombstone`: the Kafka value was null.
-- `Unresolved`: value bytes existed, but no message type could be resolved.
-- `DeserializationFailed`: the message type was resolved, but deserialization failed.
+- `DeadLetter`: value processing failed at a boundary configured to continue as dead-letter data.
 
-Unknown message types and deserialization failures are data, not fatal runtime errors. They remain in the stream as explicit `StreamValue` cases so future split, tee, and dead-letter processors can route them deliberately.
+The `DeadLetter` payload should include the original key data when available, the failed value data, headers, reason, and optional exception. Its value data should be `System.Object` because different failure boundaries have different available representations. During deserialization failure, the value data will usually be raw `Byte[]`. During later processor failure, the value data may already be a deserialized CLR object.
 
-This is intentionally different from exception-driven stream processing. Exceptions are still appropriate for programmer errors, invalid serializer configuration, duplicate type mappings, or other cases where startup or topology construction is wrong. Unknown message types, tombstones, and malformed payloads are ordinary Kafka stream conditions. The runtime should keep them observable and routable instead of crashing the application by default.
+Unknown message types and deserialization failures are data when the stream declares `ValueFailure.ContinueAsDeadLetter()`. They remain in the stream as explicit `StreamValue.DeadLetter` cases so future split, tee, and dead-letter processors can route them deliberately.
+
+This is intentionally different from exception-driven stream processing. Exceptions are still appropriate for programmer errors, invalid serializer configuration, duplicate type mappings, or other cases where startup or topology construction is wrong. Unknown message types, tombstones, and malformed payloads are ordinary Kafka stream conditions, but continuing after them must still be an explicit value failure policy choice.
+
+## Processor Failure Policy
+
+User-defined processor code is another runtime failure boundary. Processor declarations must explicitly state what should happen if user callback code throws. The first implemented processor failure policy is `ProcessorFailure.FailTopology()`. It treats unhandled exceptions from user processor code as fatal to the topology.
+
+Failing the topology is the safest first behavior because it avoids silently advancing offsets past failed processing, hiding bugs, or continuing after a partial state mutation. Future processor failure policies may include skip, retry, continue as dead letter, pause partition, and fail topology. Continuing after user-code failure must always be an explicit choice, never hidden default behavior.
 
 ## Public Programming Model
 
@@ -113,12 +124,16 @@ builder.Services.AddStreamlinr(streams =>
         ["widget"] = typeof(Widget)
     };
 
-    streams.Stream<String>("widgets", WidgetValueSerializer.Instance, resolver)
+    streams.Stream<String>(
+            "widgets",
+            WidgetValueSerializer.Instance,
+            resolver,
+            failure: ValueFailure.ContinueAsDeadLetter())
         .Peek(async (record, cancellationToken) => {
             if (record.Value is StreamValue.Resolved { Value: Widget widget }) {
                 await Console.Out.WriteLineAsync(widget.Name, cancellationToken);
             }
-        });
+        }, failure: ProcessorFailure.FailTopology());
 });
 ```
 
@@ -217,7 +232,7 @@ Health should distinguish at least these states:
 - stopped
 - fatal
 
-Early metrics should cover record counts, processing latency, Kafka consumer lag, restore progress, checkpoint failures, offset commit failures, rebalance count and duration, retries, poison records, actor failures, and backpressure.
+Early metrics should cover record counts, processing latency, Kafka consumer lag, restore progress, checkpoint failures, offset commit failures, rebalance count and duration, retries, dead-letter records, actor failures, and backpressure.
 
 State recovery diagnostics should identify whether the runtime is doing a warm restore from existing local state, a cold restore from Kafka changelogs, or a rebuild after detecting missing or corrupt local state. Operators need to see restore progress and understand whether a slow startup is expected recovery work or a stuck runtime.
 
@@ -251,7 +266,7 @@ The early failure suite should include:
 - container restart or reschedule with no persistent volume
 - local state directory deleted between runs
 - interrupted changelog restore
-- poison record handling
+- value failure and dead-letter handling
 - slow output or state store causing backpressure
 - shutdown during checkpoint
 - network interruption between the app and Kafka
@@ -277,7 +292,7 @@ builder.Services.Configure<StreamlinrOptions>(
     builder.Configuration.GetSection("Streamlinr"));
 ```
 
-Important configuration areas include application identity, Kafka bootstrap and security settings, input and output topics, state directory, local state storage mode, checkpoint interval, delivery guarantee, backpressure limits, retry policy, poison record handling, metrics names, tracing names, and shutdown timeout.
+Important configuration areas include application identity, Kafka bootstrap and security settings, input and output topics, state directory, local state storage mode, checkpoint interval, delivery guarantee, backpressure limits, retry policy, value failure handling, dead-letter handling, metrics names, tracing names, and shutdown timeout.
 
 The state directory configures the local materialization location only. It must not imply durable ownership of state unless persistence is explicitly available and verified.
 
