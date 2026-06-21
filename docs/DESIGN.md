@@ -83,7 +83,13 @@ Message type resolution is explicit and metadata-driven. The default resolver ma
 
 Failures at runtime boundaries are explicit policy decisions. Serializer failures and processor failures must declare their behavior at the boundary where the programmer has the relevant domain context.
 
-The first implemented value failure policy is `ValueFailure.ContinueAsDeadLetter()`. It keeps the record in the stream as `StreamValue.DeadLetter` so later processors can inspect, split, route, or eventually write it to a dead-letter topic. This does not mean Streamlinr immediately writes to a Kafka dead-letter topic. It means the failure is represented as stream data. Future value failure policies may include skip, pause partition, fail topology, and external dead-letter output where those behaviors are well defined.
+Streamlinr should not apply hidden defaults for failure-mode arguments. Public APIs that introduce a runtime failure boundary should require the caller to choose the failure policy explicitly, even when that makes the API more verbose. This is intentional: predictable incident behavior is more important than registration-time smoothness, and topology declarations should force reviewers to see what happens when a record cannot be resolved, cannot be deserialized, or causes user processor code to throw.
+
+Value failure policy distinguishes between unresolved message types and deserialization failures. Many Kafka topics legitimately contain message types a given topology does not handle, while a known message type that fails to deserialize may indicate corrupt data or a broken serializer. `ValueFailure.On(...)` should let those cases use different terminal actions.
+
+The convenient all-phases value failure policy is `ValueFailure.ContinueAsDeadLetter()`. It keeps both unresolved and deserialization-failed records in the stream as `StreamValue.DeadLetter` so later processors can inspect, split, route, or eventually write them to a dead-letter topic. This does not mean Streamlinr immediately writes to a Kafka dead-letter topic. It means the failure is represented as stream data. It is a convenience factory for an explicit argument, not an implicit default.
+
+Implemented value failure actions are skip, continue as dead letter, and pause partition.
 
 `StreamValue` should distinguish at least these cases:
 
@@ -93,7 +99,7 @@ The first implemented value failure policy is `ValueFailure.ContinueAsDeadLetter
 
 The `DeadLetter` payload should include the original key data when available, the failed value data, headers, reason, and optional exception. Its value data should be `System.Object` because different failure boundaries have different available representations. During deserialization failure, the value data will usually be raw `Byte[]`. During later processor failure, the value data may already be a deserialized CLR object.
 
-Unknown message types and deserialization failures are data when the stream declares `ValueFailure.ContinueAsDeadLetter()`. They remain in the stream as explicit `StreamValue.DeadLetter` cases so future split, tee, and dead-letter processors can route them deliberately.
+Unknown message types and deserialization failures are data when the stream declares `ValueFailure.ContinueAsDeadLetter()` or a phase-specific `ValueFailure.On(...)` action that continues as dead letter. They remain in the stream as explicit `StreamValue.DeadLetter` cases so future split, tee, and dead-letter processors can route them deliberately.
 
 This is intentionally different from exception-driven stream processing. Exceptions are still appropriate for programmer errors, invalid serializer configuration, duplicate type mappings, or other cases where startup or topology construction is wrong. Unknown message types, tombstones, and malformed payloads are ordinary Kafka stream conditions, but continuing after them must still be an explicit value failure policy choice.
 

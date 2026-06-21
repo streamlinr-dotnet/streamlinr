@@ -15,6 +15,23 @@ type internal RuntimeSerializationContext(topic: string, headers: IReadOnlyList<
 
 type internal RuntimeDeserializer = delegate of byte array * RuntimeSerializationContext -> obj
 
+type internal RuntimeValueFailureAction =
+    | Skip = 0
+    | PausePartition = 1
+
+type internal RuntimeValueResult private (value: obj, shouldEmit: bool, failureAction: RuntimeValueFailureAction) =
+    member _.Value = value
+    member _.ShouldEmit = shouldEmit
+    member _.FailureAction = failureAction
+
+    static member Emit(value: obj) =
+        RuntimeValueResult(value, true, RuntimeValueFailureAction.Skip)
+
+    static member Fail(action: RuntimeValueFailureAction) =
+        RuntimeValueResult(null, false, action)
+
+type internal RuntimeValueDeserializer = delegate of byte array * RuntimeSerializationContext -> RuntimeValueResult
+
 type internal SourceRecord(topic: string, partition: int, offset: int64, key: obj, value: obj, headers: IReadOnlyList<RuntimeHeader>, timestampUtc: Nullable<DateTimeOffset>) =
     member _.Topic = topic
     member _.Partition = partition
@@ -50,7 +67,7 @@ type internal ProcessorPlan(processorId: string, sourceIds: IReadOnlyList<string
     member _.FailureAction = failureAction
     member _.DeadLetterFactory = deadLetterFactory
 
-type internal SourcePlan(sourceId: string, topic: string, keyTypeName: string, keyDeserializer: RuntimeDeserializer, valueDeserializer: RuntimeDeserializer) =
+type internal SourcePlan(sourceId: string, topic: string, keyTypeName: string, keyDeserializer: RuntimeDeserializer, valueDeserializer: RuntimeValueDeserializer) =
     member _.SourceId = sourceId
     member _.Topic = topic
     member _.KeyTypeName = keyTypeName
@@ -197,15 +214,22 @@ module internal KafkaConsumerActor =
     let private toSourceRecord (source: SourcePlan) (result: Confluent.Kafka.ConsumeResult<byte array, byte array>) =
         let headers = toRuntimeHeaders result.Message.Headers
         let context = RuntimeSerializationContext(result.Topic, headers)
+        let valueResult = source.ValueDeserializer.Invoke(result.Message.Value, context)
 
-        SourceRecord(
-            result.Topic,
-            result.Partition.Value,
-            result.Offset.Value,
-            source.KeyDeserializer.Invoke(result.Message.Key, context),
-            source.ValueDeserializer.Invoke(result.Message.Value, context),
-            headers,
-            toTimestampUtc result.Message.Timestamp)
+        if valueResult.ShouldEmit then
+            Ok(Some(SourceRecord(
+                result.Topic,
+                result.Partition.Value,
+                result.Offset.Value,
+                source.KeyDeserializer.Invoke(result.Message.Key, context),
+                valueResult.Value,
+                headers,
+                toTimestampUtc result.Message.Timestamp)))
+        else
+            match valueResult.FailureAction with
+            | RuntimeValueFailureAction.Skip -> Ok None
+            | RuntimeValueFailureAction.PausePartition -> Error(result.Partition.Value)
+            | _ -> Ok None
 
     let private buildConsumer (plan: ConsumerPlan) =
         let config =
@@ -230,7 +254,10 @@ module internal KafkaConsumerActor =
                 elif result.IsPartitionEOF then
                     keepPolling <- false
                 else
-                    records.Add(toSourceRecord source result)
+                    match toSourceRecord source result with
+                    | Ok (Some record) -> records.Add record
+                    | Ok None -> ()
+                    | Error partition -> consumer.Pause([| Confluent.Kafka.TopicPartition(plan.Topic, Confluent.Kafka.Partition(partition)) |])
 
                     if plan.MaxBatchSize = 1 then
                         keepPolling <- false

@@ -23,6 +23,27 @@ module RuntimeTests =
         SourceRecord("orders", 0, 1L, "order-1", "created", Array.empty<RuntimeHeader>, Nullable())
 
     [<Fact>]
+    let ``runtime value result can emit a value`` () =
+        let result = RuntimeValueResult.Emit("created")
+
+        Assert.True(result.ShouldEmit)
+        Assert.Equal("created", result.Value :?> string)
+
+    [<Fact>]
+    let ``runtime value result can skip a value`` () =
+        let result = RuntimeValueResult.Fail RuntimeValueFailureAction.Skip
+
+        Assert.False(result.ShouldEmit)
+        Assert.Equal(RuntimeValueFailureAction.Skip, result.FailureAction)
+
+    [<Fact>]
+    let ``runtime value result can pause a partition`` () =
+        let result = RuntimeValueResult.Fail RuntimeValueFailureAction.PausePartition
+
+        Assert.False(result.ShouldEmit)
+        Assert.Equal(RuntimeValueFailureAction.PausePartition, result.FailureAction)
+
+    [<Fact>]
     let ``processor actor processes a source record batch`` () =
         let processed = TaskCompletionSource<SourceRecord>(TaskCreationOptions.RunContinuationsAsynchronously)
         let processor =

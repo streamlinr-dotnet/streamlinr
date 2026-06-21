@@ -223,6 +223,38 @@ public sealed class SerializerTests {
         Assert.Equal([3], bigEndianAttempts);
     }
 
+    [Fact]
+    public void ValueFailureContinueAsDeadLetterAppliesToAllValueFailures() {
+        var failure = ValueFailure.ContinueAsDeadLetter();
+
+        Assert.Equal(ValueFailureAction.ContinueAsDeadLetter(), failure.Unresolved);
+        Assert.Equal(ValueFailureAction.ContinueAsDeadLetter(), failure.DeserializationFailed);
+    }
+
+    [Fact]
+    public void ValueFailureCanSpecifyPhaseSpecificActions() {
+        var unresolved = ValueFailureAction.Skip();
+        var deserializationFailed = ValueFailureAction.PausePartition();
+
+        var failure = ValueFailure.On(unresolved, deserializationFailed);
+
+        Assert.Same(unresolved, failure.Unresolved);
+        Assert.Same(deserializationFailed, failure.DeserializationFailed);
+    }
+
+    [Fact]
+    public void ValueFailureRequiresBothPhaseActions() {
+        Assert.Throws<ArgumentNullException>(() => ValueFailure.On(null!, ValueFailureAction.ContinueAsDeadLetter()));
+        Assert.Throws<ArgumentNullException>(() => ValueFailure.On(ValueFailureAction.ContinueAsDeadLetter(), null!));
+    }
+
+    [Fact]
+    public void ValueFailureActionsAreDistinct() {
+        Assert.NotEqual(ValueFailureAction.Skip(), ValueFailureAction.ContinueAsDeadLetter());
+        Assert.NotEqual(ValueFailureAction.Skip(), ValueFailureAction.PausePartition());
+        Assert.NotEqual(ValueFailureAction.ContinueAsDeadLetter(), ValueFailureAction.PausePartition());
+    }
+
     sealed record Widget(String Id, String Status);
     sealed record OtherWidget(String Id, String Status);
 

@@ -20,6 +20,17 @@ public sealed class TopologyBuilderTests {
     }
 
     [Fact]
+    public void StreamCanDeclarePhaseSpecificValueFailurePolicy() {
+        var topology = new TopologyBuilder();
+        var valueFailure = ValueFailure.On(
+            unresolved           : ValueFailureAction.Skip(),
+            deserializationFailed: ValueFailureAction.PausePartition());
+
+        topology.Stream<String>("widgets", ValueSerializers.String, StringResolver(), valueFailure)
+            .Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology());
+    }
+
+    [Fact]
     public void StreamCanUseBuiltInKeySerializers() {
         var topology = new TopologyBuilder();
 

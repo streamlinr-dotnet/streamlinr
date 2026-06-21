@@ -99,30 +99,34 @@ static public class StreamlinrApplication {
         return new StreamValue.DeadLetter(record.Key, record.Value, $"Processor failed at topic '{record.Topic}', partition {record.Partition}, offset {record.Offset}.", error, headers);
     }
 
-    static RuntimeDeserializer CreateValueDeserializer(IValueSerializer serializer, IMessageTypeResolver messageTypeResolver, ValueFailure failure) {
-        if (failure is not ValueFailure.ContinueAsDeadLetterPolicy)
-            throw new InvalidOperationException("The requested value failure policy is not supported by this runtime.");
-
-        return new RuntimeDeserializer((data, context) => {
+    static RuntimeValueDeserializer CreateValueDeserializer(IValueSerializer serializer, IMessageTypeResolver messageTypeResolver, ValueFailure failure) {
+        return new RuntimeValueDeserializer((data, context) => {
             var headers              = new MessageHeaders(context.Headers.Select(header => (header.Name, header.Value)));
             var serializationContext = new SerializationContext(context.Topic, headers);
 
-            if (data is null) return new StreamValue.Tombstone();
+            if (data is null) return RuntimeValueResult.Emit(new StreamValue.Tombstone());
 
             return messageTypeResolver.ResolveType(serializationContext) switch {
-                MessageTypeResolution.Resolved resolved => DeserializeValue(serializer, data, resolved.Type, serializationContext, headers),
-                MessageTypeResolution.Unresolved unresolved => new StreamValue.DeadLetter(null, data, unresolved.Reason, null, headers),
-                _ => new StreamValue.DeadLetter(null, data, "Message type resolver returned an unsupported resolution result.", null, headers),
+                MessageTypeResolution.Resolved resolved => DeserializeValue(serializer, data, resolved.Type, serializationContext, headers, failure.DeserializationFailed),
+                MessageTypeResolution.Unresolved unresolved => ApplyValueFailure(failure.Unresolved, new StreamValue.DeadLetter(null, data, unresolved.Reason, null, headers)),
+                _ => ApplyValueFailure(failure.Unresolved, new StreamValue.DeadLetter(null, data, "Message type resolver returned an unsupported resolution result.", null, headers)),
             };
         });
     }
 
-    static StreamValue DeserializeValue(IValueSerializer serializer, Byte[] data, Type valueType, SerializationContext context, MessageHeaders headers) {
+    static RuntimeValueResult DeserializeValue(IValueSerializer serializer, Byte[] data, Type valueType, SerializationContext context, MessageHeaders headers, ValueFailureAction failureAction) {
         try {
-            return new StreamValue.Resolved(serializer.Deserialize(data, valueType, context), valueType);
+            return RuntimeValueResult.Emit(new StreamValue.Resolved(serializer.Deserialize(data, valueType, context), valueType));
         }
         catch (Exception error) {
-            return new StreamValue.DeadLetter(null, data, $"Failed to deserialize value as CLR type '{valueType.FullName}'.", error, headers);
+            return ApplyValueFailure(failureAction, new StreamValue.DeadLetter(null, data, $"Failed to deserialize value as CLR type '{valueType.FullName}'.", error, headers));
         }
     }
+
+    static RuntimeValueResult ApplyValueFailure(ValueFailureAction action, StreamValue.DeadLetter deadLetter) => action switch {
+        ValueFailureAction.SkipPolicy => RuntimeValueResult.Fail(RuntimeValueFailureAction.Skip),
+        ValueFailureAction.ContinueAsDeadLetterPolicy => RuntimeValueResult.Emit(deadLetter),
+        ValueFailureAction.PausePartitionPolicy => RuntimeValueResult.Fail(RuntimeValueFailureAction.PausePartition),
+        _ => throw new InvalidOperationException("The requested value failure action is not supported by this runtime."),
+    };
 }
