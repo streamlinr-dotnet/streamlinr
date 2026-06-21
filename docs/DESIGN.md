@@ -99,9 +99,11 @@ This is intentionally different from exception-driven stream processing. Excepti
 
 ## Processor Failure Policy
 
-User-defined processor code is another runtime failure boundary. Processor declarations must explicitly state what should happen if user callback code throws. The first implemented processor failure policy is `ProcessorFailure.FailTopology()`. It treats unhandled exceptions from user processor code as fatal to the topology.
+User-defined processor code is another runtime failure boundary. Processor declarations must explicitly state what should happen if user callback code throws. Processor failure policy describes the terminal outcome after any retry, timeout, or resilience behavior the callback itself applies. If a processor needs Polly or another retry strategy around an external dependency, the callback should own that strategy before allowing an exception to escape to Streamlinr.
 
-Failing the topology is the safest first behavior because it avoids silently advancing offsets past failed processing, hiding bugs, or continuing after a partial state mutation. Future processor failure policies may include skip, retry, continue as dead letter, pause partition, and fail topology. Continuing after user-code failure must always be an explicit choice, never hidden default behavior.
+The first implemented processor failure policies are `ProcessorFailure.FailTopology()`, `ProcessorFailure.Skip()`, `ProcessorFailure.ContinueAsDeadLetter()`, and `ProcessorFailure.PausePartition()`.
+
+Failing the topology is the safest behavior when correctness is uncertain because it avoids silently advancing offsets past failed processing, hiding bugs, or continuing after a partial state mutation. Skipping a record, continuing as dead-letter data, or pausing a partition are explicit terminal choices for processors whose domain semantics make those outcomes safe. Continuing after user-code failure must always be an explicit choice, never hidden default behavior.
 
 ## Public Programming Model
 
@@ -310,11 +312,18 @@ State compatibility needs special care because a bad state migration can become 
 
 Source generators may be useful later for topology metadata, serialization helpers, compile-time validation hints, or analyzers. They should not be required for the initial runtime unless they clearly improve correctness.
 
+## Analyzers
+
+A future `Streamlinr.Analyzers` project should provide compile-time diagnostics for topology declarations where static analysis can improve reliability. One early analyzer should detect topology cycles and warn or fail when a declared topology is not a directed acyclic graph.
+
+Keeping runtime topologies as DAGs makes validation, scheduling, offset behavior, backpressure, observability, and failure reasoning simpler. Retry feedback loops should be modeled explicitly, such as through Kafka retry topics, rather than by introducing in-memory topology cycles.
+
 ## Initial Project Layout
 
 ```text
 src/Streamlinr.Core/               # F# private runtime implementation assembly
 src/Streamlinr/                    # C# public API assembly
+src/Streamlinr.Analyzers/          # future C# analyzer assembly for topology diagnostics
 tests/Streamlinr.Core.Tests/       # F# runtime unit tests
 tests/Streamlinr.Tests/            # C# public API unit tests
 tests/Streamlinr.IntegrationTests/ # C# Testcontainers Kafka integration tests

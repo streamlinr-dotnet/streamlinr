@@ -54,7 +54,9 @@ static public class StreamlinrApplication {
                 return new ProcessorPlan(
                     processor.ProcessorId,
                     processor.SourceIds.ToArray(),
-                    (record, token) => processor.Callback(record.Key, record.Value, token));
+                    (record, token) => processor.Callback(record.Key, record.Value, token),
+                    ToRuntimeProcessorFailureAction(processor.Failure),
+                    CreateProcessorDeadLetter);
             })
             .ToArray();
 
@@ -80,8 +82,21 @@ static public class StreamlinrApplication {
         });
 
     static void ValidateProcessorFailure(ProcessorFailure failure) {
-        if (failure is not ProcessorFailure.FailTopologyPolicy)
+        if (failure is not (ProcessorFailure.FailTopologyPolicy or ProcessorFailure.SkipPolicy or ProcessorFailure.ContinueAsDeadLetterPolicy or ProcessorFailure.PausePartitionPolicy))
             throw new InvalidOperationException("The requested processor failure policy is not supported by this runtime.");
+    }
+
+    static RuntimeProcessorFailureAction ToRuntimeProcessorFailureAction(ProcessorFailure failure) => failure switch {
+        ProcessorFailure.FailTopologyPolicy => RuntimeProcessorFailureAction.FailTopology,
+        ProcessorFailure.SkipPolicy => RuntimeProcessorFailureAction.Skip,
+        ProcessorFailure.ContinueAsDeadLetterPolicy => RuntimeProcessorFailureAction.ContinueAsDeadLetter,
+        ProcessorFailure.PausePartitionPolicy => RuntimeProcessorFailureAction.PausePartition,
+        _ => throw new InvalidOperationException("The requested processor failure policy is not supported by this runtime."),
+    };
+
+    static Object CreateProcessorDeadLetter(SourceRecord record, Exception error) {
+        var headers = new MessageHeaders(record.Headers.Select(header => (header.Name, header.Value)));
+        return new StreamValue.DeadLetter(record.Key, record.Value, $"Processor failed at topic '{record.Topic}', partition {record.Partition}, offset {record.Offset}.", error, headers);
     }
 
     static RuntimeDeserializer CreateValueDeserializer(IValueSerializer serializer, IMessageTypeResolver messageTypeResolver, ValueFailure failure) {

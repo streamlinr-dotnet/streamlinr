@@ -15,12 +15,13 @@ type internal RuntimeSerializationContext(topic: string, headers: IReadOnlyList<
 
 type internal RuntimeDeserializer = delegate of byte array * RuntimeSerializationContext -> obj
 
-type internal SourceRecord(topic: string, partition: int, offset: int64, key: obj, value: obj, timestampUtc: Nullable<DateTimeOffset>) =
+type internal SourceRecord(topic: string, partition: int, offset: int64, key: obj, value: obj, headers: IReadOnlyList<RuntimeHeader>, timestampUtc: Nullable<DateTimeOffset>) =
     member _.Topic = topic
     member _.Partition = partition
     member _.Offset = offset
     member _.Key = key
     member _.Value = value
+    member _.Headers = headers
     member _.TimestampUtc = timestampUtc
 
 type internal SourceRecordBatch(batchId: Guid, sourceId: string, records: IReadOnlyList<SourceRecord>, receivedAtUtc: DateTimeOffset) =
@@ -34,11 +35,20 @@ type internal BatchProcessingResult(batchId: Guid, processedRecordCount: int) =
     member _.ProcessedRecordCount = processedRecordCount
 
 type internal RecordProcessor = delegate of SourceRecord * CancellationToken -> Task
+type internal RuntimeDeadLetterFactory = delegate of SourceRecord * exn -> obj
 
-type internal ProcessorPlan(processorId: string, sourceIds: IReadOnlyList<string>, processor: RecordProcessor) =
+type internal RuntimeProcessorFailureAction =
+    | FailTopology = 0
+    | Skip = 1
+    | ContinueAsDeadLetter = 2
+    | PausePartition = 3
+
+type internal ProcessorPlan(processorId: string, sourceIds: IReadOnlyList<string>, processor: RecordProcessor, failureAction: RuntimeProcessorFailureAction, deadLetterFactory: RuntimeDeadLetterFactory) =
     member _.ProcessorId = processorId
     member _.SourceIds = sourceIds
     member _.Processor = processor
+    member _.FailureAction = failureAction
+    member _.DeadLetterFactory = deadLetterFactory
 
 type internal SourcePlan(sourceId: string, topic: string, keyTypeName: string, keyDeserializer: RuntimeDeserializer, valueDeserializer: RuntimeDeserializer) =
     member _.SourceId = sourceId
@@ -77,6 +87,10 @@ type internal RuntimeStatus =
 type internal ProcessorError =
     { ProcessorId: string
       BatchId: Guid
+      SourceId: string
+      Record: SourceRecord
+      FailureAction: RuntimeProcessorFailureAction
+      DeadLetterFactory: RuntimeDeadLetterFactory
       Error: exn }
 
 type internal RuntimeStartError =
@@ -101,7 +115,7 @@ type internal TopologyStatus =
 
 type internal TopologyMessage =
     | StartTopology of TopologyPlan * AsyncReplyChannel<Result<unit, TopologyStartError>>
-    | SourceBatchReceived of SourceRecordBatch
+    | SourceBatchReceived of SourceRecordBatch * AsyncReplyChannel<unit>
     | SourceFailed of topic: string * error: exn
     | ProcessorFailed of processorId: string * error: exn
     | StopTopology of AsyncReplyChannel<unit>
@@ -110,6 +124,7 @@ type internal TopologyMessage =
 type internal KafkaConsumerMessage =
     | StartConsuming of ConsumerPlan * SourcePlan * target: Actor<TopologyMessage> * AsyncReplyChannel<Result<unit, ConsumerStartError>>
     | Poll
+    | PausePartition of partition: int * AsyncReplyChannel<unit>
     | StopConsuming of AsyncReplyChannel<unit>
 
 type internal RuntimeSupervisorMessage =
@@ -127,11 +142,31 @@ module internal ProcessorActor =
                 task {
                     try
                         for record in batch.Records do
-                            do! processorPlan.Processor.Invoke(record, cancellationToken)
+                            try
+                                do! processorPlan.Processor.Invoke(record, cancellationToken)
+                            with error ->
+                                return reply.Reply(Error {
+                                    ProcessorId = processorPlan.ProcessorId
+                                    BatchId = batch.BatchId
+                                    SourceId = batch.SourceId
+                                    Record = record
+                                    FailureAction = processorPlan.FailureAction
+                                    DeadLetterFactory = processorPlan.DeadLetterFactory
+                                    Error = error
+                                })
 
                         reply.Reply(Ok(BatchProcessingResult(batch.BatchId, batch.Records.Count)))
                     with error ->
-                        reply.Reply(Error { ProcessorId = processorPlan.ProcessorId; BatchId = batch.BatchId; Error = error })
+                        let record = batch.Records[0]
+                        reply.Reply(Error {
+                            ProcessorId = processorPlan.ProcessorId
+                            BatchId = batch.BatchId
+                            SourceId = batch.SourceId
+                            Record = record
+                            FailureAction = processorPlan.FailureAction
+                            DeadLetterFactory = processorPlan.DeadLetterFactory
+                            Error = error
+                        })
                 }
                 |> ignore
 
@@ -169,6 +204,7 @@ module internal KafkaConsumerActor =
             result.Offset.Value,
             source.KeyDeserializer.Invoke(result.Message.Key, context),
             source.ValueDeserializer.Invoke(result.Message.Value, context),
+            headers,
             toTimestampUtc result.Message.Timestamp)
 
     let private buildConsumer (plan: ConsumerPlan) =
@@ -222,6 +258,9 @@ module internal KafkaConsumerActor =
             | StopConsuming reply ->
                 reply.Reply()
                 Terminate
+            | PausePartition (_, reply) ->
+                reply.Reply()
+                Handled
             | _ -> Unhandled)
 
         and running plan source target consumer = Behaviour (fun (context: ActorContext<KafkaConsumerMessage>) ->
@@ -229,8 +268,12 @@ module internal KafkaConsumerActor =
             | Poll ->
                 match tryCollectBatch consumer plan source with
                 | Ok (Some batch) ->
-                    Actor.post (SourceBatchReceived batch) target
-                    Actor.post Poll context.Self
+                    task {
+                        do! Actor.postAndAsyncReply (fun channel -> SourceBatchReceived(batch, channel)) target |> Async.StartAsTask
+                        Actor.post Poll context.Self
+                    }
+                    |> ignore
+
                     Handled
                 | Ok None ->
                     Actor.post Poll context.Self
@@ -238,6 +281,10 @@ module internal KafkaConsumerActor =
                 | Error error ->
                     Actor.post (SourceFailed(plan.Topic, error)) target
                     Terminate
+            | PausePartition (partition, reply) ->
+                consumer.Pause([| Confluent.Kafka.TopicPartition(plan.Topic, Confluent.Kafka.Partition(partition)) |])
+                reply.Reply()
+                Handled
             | StopConsuming reply ->
                 consumer.Close()
                 consumer.Dispose()
@@ -258,12 +305,30 @@ module internal TopologyActor =
             Ok()
 
     let private stopConsumers consumers =
-        for consumer in consumers do
+        for _, consumer in consumers do
             Actor.postAndAsyncReply StopConsuming consumer |> Async.RunSynchronously
 
     let private stopProcessors processors =
         for _, processor in processors do
             Actor.postAndAsyncReply StopProcessor processor |> Async.RunSynchronously
+
+    let private pauseConsumerPartition sourceId partition consumers =
+        consumers
+        |> Seq.tryFind (fun (consumerSourceId, _) -> consumerSourceId = sourceId)
+        |> Option.iter (fun (_, consumer) -> Actor.postAndAsyncReply (fun channel -> PausePartition(partition, channel)) consumer |> Async.RunSynchronously)
+
+    let private deadLetterBatch (batch: SourceRecordBatch) (record: SourceRecord) (deadLetterValue: obj) =
+        let deadLetterRecord =
+            SourceRecord(
+                record.Topic,
+                record.Partition,
+                record.Offset,
+                record.Key,
+                deadLetterValue,
+                record.Headers,
+                record.TimestampUtc)
+
+        SourceRecordBatch(Guid.NewGuid(), batch.SourceId, [| deadLetterRecord |], DateTimeOffset.UtcNow)
 
     let start (runtimePlan: RuntimePlan) (supervisor: Actor<RuntimeSupervisorMessage>) (cancellationToken: CancellationToken) =
         let rec created = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
@@ -279,7 +344,7 @@ module internal TopologyActor =
                         |> Seq.map (fun processor -> processor, ProcessorActor.start processor cancellationToken)
                         |> Seq.toList
 
-                    let consumers = ResizeArray<Actor<KafkaConsumerMessage>>()
+                    let consumers = ResizeArray<string * Actor<KafkaConsumerMessage>>()
                     let mutable startError = None
 
                     for source in plan.Sources do
@@ -289,7 +354,7 @@ module internal TopologyActor =
                             let started = Actor.postAndAsyncReply (fun channel -> StartConsuming(consumerPlan, source, context.Self, channel)) consumer |> Async.RunSynchronously
 
                             match started with
-                            | Ok () -> consumers.Add consumer
+                            | Ok () -> consumers.Add((source.SourceId, consumer))
                             | Error error -> startError <- Some error.Message
 
                     match startError with
@@ -311,15 +376,34 @@ module internal TopologyActor =
 
         and running processors consumers = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
             match context.Message with
-            | SourceBatchReceived batch ->
+            | SourceBatchReceived (batch, reply) ->
                 task {
+                    let mutable activeBatch = Some batch
+
                     for processorPlan, processor in processors do
-                        if processorPlan.SourceIds |> Seq.contains batch.SourceId then
-                            let! result = Actor.postAndAsyncReply (fun channel -> ProcessBatch(batch, channel)) processor |> Async.StartAsTask
+                        if processorPlan.SourceIds |> Seq.contains batch.SourceId && activeBatch.IsSome then
+                            let currentBatch = activeBatch.Value
+                            let! result = Actor.postAndAsyncReply (fun channel -> ProcessBatch(currentBatch, channel)) processor |> Async.StartAsTask
 
                             match result with
                             | Ok _ -> ()
-                            | Error error -> Actor.post (ProcessorFailed(processorPlan.ProcessorId, error.Error)) context.Self
+                            | Error error ->
+                                match error.FailureAction with
+                                | RuntimeProcessorFailureAction.FailTopology ->
+                                    activeBatch <- None
+                                    Actor.post (ProcessorFailed(processorPlan.ProcessorId, error.Error)) context.Self
+                                | RuntimeProcessorFailureAction.Skip ->
+                                    activeBatch <- None
+                                | RuntimeProcessorFailureAction.ContinueAsDeadLetter ->
+                                    activeBatch <- Some(deadLetterBatch currentBatch error.Record (error.DeadLetterFactory.Invoke(error.Record, error.Error)))
+                                | RuntimeProcessorFailureAction.PausePartition ->
+                                    activeBatch <- None
+                                    pauseConsumerPartition error.SourceId error.Record.Partition consumers
+                                | _ ->
+                                    activeBatch <- None
+                                    Actor.post (ProcessorFailed(processorPlan.ProcessorId, error.Error)) context.Self
+
+                    reply.Reply()
                 }
                 |> ignore
 

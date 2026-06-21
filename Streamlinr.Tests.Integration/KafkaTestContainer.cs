@@ -79,13 +79,17 @@ public class KafkaTestContainer : IAsyncDisposable {
         await WaitForKafkaAsync(BootstrapServers, () => GetKafkaLogsAsync(timeoutToken.Token), timeoutToken.Token);
     }
 
-    public async Task CreateTopicAsync(String topic, CancellationToken cancellationToken) {
+    public Task CreateTopicAsync(String topic, CancellationToken cancellationToken) => CreateTopicAsync(topic, partitionCount: 1, cancellationToken);
+
+    public async Task CreateTopicAsync(String topic, Int32 partitionCount, CancellationToken cancellationToken) {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitionCount);
+
         using var admin = new AdminClientBuilder(new AdminClientConfig {
             BootstrapServers = DirectBootstrapServers,
         }).Build();
 
         await admin.CreateTopicsAsync(
-            topics : [new TopicSpecification { Name = topic, NumPartitions = 1, ReplicationFactor = 1 }],
+            topics : [new TopicSpecification { Name = topic, NumPartitions = partitionCount, ReplicationFactor = 1 }],
             options: new CreateTopicsOptions {
                 OperationTimeout = TimeSpan.FromSeconds(10),
                 RequestTimeout   = TimeSpan.FromSeconds(10),
@@ -105,6 +109,25 @@ public class KafkaTestContainer : IAsyncDisposable {
         }).Build();
 
         await producer.ProduceAsync(topic, new Message<Byte[], Byte[]> {
+            Key     = message.Key,
+            Value   = message.Value!,
+            Headers = ToKafkaHeaders(headers),
+        }, cancellationToken);
+
+        producer.Flush(TimeSpan.FromSeconds(10));
+    }
+
+    public async Task ProduceBytesAsync(String topic, Int32 partition, (Byte[] Key, Byte[]? Value) message, MessageHeaders headers, CancellationToken cancellationToken) {
+        ArgumentException.ThrowIfNullOrEmpty(topic);
+        ArgumentOutOfRangeException.ThrowIfNegative(partition);
+        ArgumentNullException.ThrowIfNull(headers);
+
+        using var producer = new ProducerBuilder<Byte[], Byte[]>(new ProducerConfig {
+            BootstrapServers = DirectBootstrapServers,
+            MessageTimeoutMs = 10_000,
+        }).Build();
+
+        await producer.ProduceAsync(new TopicPartition(topic, new Partition(partition)), new Message<Byte[], Byte[]> {
             Key     = message.Key,
             Value   = message.Value!,
             Headers = ToKafkaHeaders(headers),
