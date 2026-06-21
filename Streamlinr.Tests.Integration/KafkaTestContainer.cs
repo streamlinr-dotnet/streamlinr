@@ -9,7 +9,7 @@ using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Containers;
 using DotNet.Testcontainers.Networks;
 
-class KafkaTestContainer : IAsyncDisposable {
+public class KafkaTestContainer : IAsyncDisposable {
     const String KafkaAlias = "kafka";
     const String ToxiproxyAlias = "toxiproxy";
     const String KafkaProxyName = "kafka";
@@ -105,8 +105,8 @@ class KafkaTestContainer : IAsyncDisposable {
         }).Build();
 
         await producer.ProduceAsync(topic, new Message<Byte[], Byte[]> {
-            Key = message.Key,
-            Value = message.Value!,
+            Key     = message.Key,
+            Value   = message.Value!,
             Headers = ToKafkaHeaders(headers),
         }, cancellationToken);
 
