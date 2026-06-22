@@ -180,6 +180,39 @@ public class KafkaTestContainer : IAsyncDisposable {
         }
     }
 
+    public Int64? GetCommittedOffset(String topic, String groupId, Int32 partition) {
+        ArgumentException.ThrowIfNullOrEmpty(topic);
+        ArgumentException.ThrowIfNullOrEmpty(groupId);
+        ArgumentOutOfRangeException.ThrowIfNegative(partition);
+
+        using var consumer = new ConsumerBuilder<Byte[], Byte[]>(new ConsumerConfig {
+            BootstrapServers  = DirectBootstrapServers,
+            GroupId           = groupId,
+            EnableAutoCommit  = false,
+            EnableAutoOffsetStore = false,
+        }).Build();
+
+        var offsets = consumer.Committed([new TopicPartition(topic, new Partition(partition))], TimeSpan.FromSeconds(1));
+        var offset = offsets.Single().Offset;
+
+        return offset == Offset.Unset ? null : offset.Value;
+    }
+
+    public async Task WaitForCommittedOffsetAsync(String topic, String groupId, Int32 partition, Int64 expectedOffset, CancellationToken cancellationToken) {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+
+        while (DateTimeOffset.UtcNow < deadline) {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (GetCommittedOffset(topic, groupId, partition) == expectedOffset)
+                return;
+
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+        }
+
+        throw new TimeoutException($"Kafka consumer group '{groupId}' did not commit offset {expectedOffset} for {topic}[{partition}].");
+    }
+
     public async Task RestoreNetworkAsync(CancellationToken cancellationToken) {
         await ResetToxiproxyAsync(cancellationToken);
         await CreateKafkaProxyAsync(cancellationToken);

@@ -13,14 +13,137 @@ module RuntimeTests =
     let private deadLetterFactory =
         RuntimeDeadLetterFactory(fun record _ -> record.Value)
 
+    let private noOpProcessor =
+        RecordProcessor(fun _ _ -> Task.CompletedTask)
+
+    let private skipSinkEncoder =
+        RuntimeSinkEncoder(fun _ -> RuntimeSinkResult.Skip())
+
     let private processorPlan processor =
-        ProcessorPlan("peek-1", [| "source-1" |], processor, RuntimeProcessorFailureAction.FailTopology, deadLetterFactory)
+        ProcessorPlan("peek-1", "source-1", [| "source-1" |], processor, RuntimeProcessorFailureAction.FailTopology, deadLetterFactory)
 
     let private processorPlanWithFailureAction failureAction processor =
-        ProcessorPlan("peek-1", [| "source-1" |], processor, failureAction, deadLetterFactory)
+        ProcessorPlan("peek-1", "source-1", [| "source-1" |], processor, failureAction, deadLetterFactory)
+
+    let private sourcePlan sourceId =
+        SourcePlan(
+            sourceId,
+            $"{sourceId}-topic",
+            typeof<string>.FullName,
+            RuntimeDeserializer(fun _ _ -> "order-1"),
+            RuntimeValueDeserializer(fun _ _ -> RuntimeValueResult.Emit("created")))
+
+    let private sinkPlan sinkId streamId sourceIds =
+        SinkPlan(sinkId, streamId, sourceIds, skipSinkEncoder, RuntimeProcessorFailureAction.FailTopology)
+
+    let private nodeIdText (RuntimeNodeId value) = value
+
+    let private edgePair (edge: RuntimeEdge) =
+        nodeIdText edge.FromNodeId, nodeIdText edge.ToNodeId
+
+    let private assertEdge fromNodeId toNodeId (graph: RuntimeTopologyGraph) =
+        Assert.Contains(graph.Edges, fun edge -> edgePair edge = (fromNodeId, toNodeId))
 
     let private sourceRecord () =
         SourceRecord("orders", 0, 1L, "order-1", "created", Array.empty<RuntimeHeader>, Nullable())
+
+    [<Fact>]
+    let ``runtime topology graph compiles source to processor`` () =
+        let plan = TopologyPlan("default", [| sourcePlan "source-1" |], [| processorPlan noOpProcessor |], Array.empty<SinkPlan>)
+
+        let graph = RuntimeTopologyGraph.compile plan
+
+        Assert.Contains(graph.Nodes, fun node -> node.NodeId = RuntimeNodeId "source-1" && node.Kind = RuntimeNodeKind.SourceNode)
+        Assert.Contains(graph.Nodes, fun node -> node.NodeId = RuntimeNodeId "peek-1" && node.Kind = RuntimeNodeKind.ProcessorNode)
+        assertEdge "source-1" "peek-1" graph
+
+    [<Fact>]
+    let ``runtime topology graph compiles source to sink`` () =
+        let plan = TopologyPlan("default", [| sourcePlan "source-1" |], Array.empty<ProcessorPlan>, [| sinkPlan "sink-1" "source-1" [| "source-1" |] |])
+
+        let graph = RuntimeTopologyGraph.compile plan
+
+        Assert.Contains(graph.Nodes, fun node -> node.NodeId = RuntimeNodeId "sink-1" && node.Kind = RuntimeNodeKind.SinkNode)
+        assertEdge "source-1" "sink-1" graph
+
+    [<Fact>]
+    let ``runtime topology graph compiles source to processor to sink`` () =
+        let plan = TopologyPlan("default", [| sourcePlan "source-1" |], [| processorPlan noOpProcessor |], [| sinkPlan "sink-1" "source-1" [| "source-1" |] |])
+
+        let graph = RuntimeTopologyGraph.compile plan
+
+        assertEdge "source-1" "peek-1" graph
+        assertEdge "peek-1" "sink-1" graph
+
+    [<Fact>]
+    let ``runtime topology graph chains processors in declaration order`` () =
+        let first = ProcessorPlan("peek-1", "source-1", [| "source-1" |], noOpProcessor, RuntimeProcessorFailureAction.FailTopology, deadLetterFactory)
+        let second = ProcessorPlan("peek-2", "source-1", [| "source-1" |], noOpProcessor, RuntimeProcessorFailureAction.FailTopology, deadLetterFactory)
+        let plan = TopologyPlan("default", [| sourcePlan "source-1" |], [| first; second |], [| sinkPlan "sink-1" "source-1" [| "source-1" |] |])
+
+        let graph = RuntimeTopologyGraph.compile plan
+
+        assertEdge "source-1" "peek-1" graph
+        assertEdge "peek-1" "peek-2" graph
+        assertEdge "peek-2" "sink-1" graph
+
+    [<Fact>]
+    let ``runtime topology graph compiles merged source streams`` () =
+        let processor = ProcessorPlan("peek-1", "merge-1", [| "source-1"; "source-2" |], noOpProcessor, RuntimeProcessorFailureAction.FailTopology, deadLetterFactory)
+        let plan = TopologyPlan("default", [| sourcePlan "source-1"; sourcePlan "source-2" |], [| processor |], Array.empty<SinkPlan>)
+
+        let graph = RuntimeTopologyGraph.compile plan
+
+        Assert.Contains(graph.Nodes, fun node -> node.NodeId = RuntimeNodeId "merge-1" && node.Kind = RuntimeNodeKind.MergeNode)
+        assertEdge "source-1" "merge-1" graph
+        assertEdge "source-2" "merge-1" graph
+        assertEdge "merge-1" "peek-1" graph
+
+    [<Fact>]
+    let ``routing slip remains pending while work is pending`` () =
+        let slip, _ = RoutingSlip.create "source-1" "orders" 0 1L |> RoutingSlip.addWork (RuntimeNodeId "peek-1") None
+
+        Assert.Equal(RoutingSlipStatus.Pending, slip.Status)
+
+    [<Fact>]
+    let ``routing slip completes when all work is completed or dropped`` () =
+        let slip, first = RoutingSlip.create "source-1" "orders" 0 1L |> RoutingSlip.addWork (RuntimeNodeId "peek-1") None
+        let slip, second = slip |> RoutingSlip.addWork (RuntimeNodeId "sink-1") (Some first.WorkItemId)
+
+        let completed = slip |> RoutingSlip.complete first.WorkItemId |> RoutingSlip.drop second.WorkItemId
+
+        Assert.Equal(RoutingSlipStatus.Completed, completed.Status)
+
+    [<Fact>]
+    let ``routing slip keeps fan-out pending when one branch drops`` () =
+        let slip, first = RoutingSlip.create "source-1" "orders" 0 1L |> RoutingSlip.addWork (RuntimeNodeId "peek-1") None
+        let slip, second = slip |> RoutingSlip.addWork (RuntimeNodeId "peek-2") None
+
+        let partiallyDropped = slip |> RoutingSlip.drop first.WorkItemId
+
+        Assert.Equal(RoutingSlipStatus.Pending, partiallyDropped.Status)
+
+        let completed = partiallyDropped |> RoutingSlip.complete second.WorkItemId
+
+        Assert.Equal(RoutingSlipStatus.Completed, completed.Status)
+
+    [<Fact>]
+    let ``routing slip fails when any work item fails`` () =
+        let slip, workItem = RoutingSlip.create "source-1" "orders" 0 1L |> RoutingSlip.addWork (RuntimeNodeId "peek-1") None
+
+        let failed = slip |> RoutingSlip.fail workItem.WorkItemId (InvalidOperationException("boom"))
+
+        Assert.Equal(RoutingSlipStatus.Failed, failed.Status)
+        Assert.Equal(RoutingSlipWorkState.Failed, failed.WorkItems[0].State)
+
+    [<Fact>]
+    let ``routing slip pauses when any work item pauses`` () =
+        let slip, workItem = RoutingSlip.create "source-1" "orders" 0 1L |> RoutingSlip.addWork (RuntimeNodeId "peek-1") None
+
+        let paused = slip |> RoutingSlip.pause workItem.WorkItemId
+
+        Assert.Equal(RoutingSlipStatus.Paused, paused.Status)
+        Assert.Equal(RoutingSlipWorkState.Paused, paused.WorkItems[0].State)
 
     [<Fact>]
     let ``runtime value result can emit a value`` () =

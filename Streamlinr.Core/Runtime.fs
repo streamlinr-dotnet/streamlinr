@@ -78,15 +78,17 @@ type internal RuntimeProcessorFailureAction =
     | ContinueAsDeadLetter = 2
     | PausePartition = 3
 
-type internal ProcessorPlan(processorId: string, sourceIds: IReadOnlyList<string>, processor: RecordProcessor, failureAction: RuntimeProcessorFailureAction, deadLetterFactory: RuntimeDeadLetterFactory) =
+type internal ProcessorPlan(processorId: string, streamId: string, sourceIds: IReadOnlyList<string>, processor: RecordProcessor, failureAction: RuntimeProcessorFailureAction, deadLetterFactory: RuntimeDeadLetterFactory) =
     member _.ProcessorId = processorId
+    member _.StreamId = streamId
     member _.SourceIds = sourceIds
     member _.Processor = processor
     member _.FailureAction = failureAction
     member _.DeadLetterFactory = deadLetterFactory
 
-type internal SinkPlan(sinkId: string, sourceIds: IReadOnlyList<string>, encoder: RuntimeSinkEncoder, failureAction: RuntimeProcessorFailureAction) =
+type internal SinkPlan(sinkId: string, streamId: string, sourceIds: IReadOnlyList<string>, encoder: RuntimeSinkEncoder, failureAction: RuntimeProcessorFailureAction) =
     member _.SinkId = sinkId
+    member _.StreamId = streamId
     member _.SourceIds = sourceIds
     member _.Encoder = encoder
     member _.FailureAction = failureAction
@@ -103,6 +105,192 @@ type internal TopologyPlan(topologyName: string, sources: IReadOnlyList<SourcePl
     member _.Sources = sources
     member _.Processors = processors
     member _.Sinks = sinks
+
+type internal RuntimeNodeId = RuntimeNodeId of string
+
+type internal RuntimeNodeKind =
+    | SourceNode = 0
+    | MergeNode = 1
+    | ProcessorNode = 2
+    | SinkNode = 3
+
+type internal RuntimeNode(nodeId: RuntimeNodeId, kind: RuntimeNodeKind) =
+    member _.NodeId = nodeId
+    member _.Kind = kind
+
+type internal RuntimeEdge(fromNodeId: RuntimeNodeId, toNodeId: RuntimeNodeId) =
+    member _.FromNodeId = fromNodeId
+    member _.ToNodeId = toNodeId
+
+type internal RuntimeTopologyGraph(nodes: IReadOnlyList<RuntimeNode>, edges: IReadOnlyList<RuntimeEdge>, sourceNodeIds: IReadOnlyList<RuntimeNodeId>, sinkNodeIds: IReadOnlyList<RuntimeNodeId>) =
+    member _.Nodes = nodes
+    member _.Edges = edges
+    member _.SourceNodeIds = sourceNodeIds
+    member _.SinkNodeIds = sinkNodeIds
+
+[<RequireQualifiedAccess>]
+type internal RoutingSlipWorkState =
+    | Pending = 0
+    | Completed = 1
+    | Dropped = 2
+    | Failed = 3
+    | Paused = 4
+
+[<RequireQualifiedAccess>]
+type internal RoutingSlipStatus =
+    | Pending = 0
+    | Completed = 1
+    | Failed = 2
+    | Paused = 3
+
+type internal RoutingSlipWorkItem =
+    { WorkItemId: Guid
+      NodeId: RuntimeNodeId
+      ParentWorkItemId: Guid option
+      State: RoutingSlipWorkState
+      Failure: exn option }
+
+type internal RoutingSlip =
+    { SourceId: string
+      Topic: string
+      Partition: int
+      Offset: int64
+      WorkItems: IReadOnlyList<RoutingSlipWorkItem>
+      Status: RoutingSlipStatus }
+
+[<RequireQualifiedAccess>]
+module internal RuntimeTopologyGraph =
+    let private nodeId value = RuntimeNodeId value
+
+    let private hasNode nodeId (nodes: ResizeArray<RuntimeNode>) =
+        nodes |> Seq.exists (fun node -> node.NodeId = nodeId)
+
+    let private addNode kind nodeId (nodes: ResizeArray<RuntimeNode>) =
+        if not (hasNode nodeId nodes) then
+            nodes.Add(RuntimeNode(nodeId, kind))
+
+    let private addEdge fromNodeId toNodeId (edges: ResizeArray<RuntimeEdge>) =
+        if edges |> Seq.exists (fun edge -> edge.FromNodeId = fromNodeId && edge.ToNodeId = toNodeId) |> not then
+            edges.Add(RuntimeEdge(fromNodeId, toNodeId))
+
+    let private nodeForStreamId sourceIds streamId (nodes: ResizeArray<RuntimeNode>) (edges: ResizeArray<RuntimeEdge>) =
+        let streamNodeId = nodeId streamId
+
+        if sourceIds |> Seq.contains streamId then
+            streamNodeId
+        elif hasNode streamNodeId nodes then
+            streamNodeId
+        else
+            addNode RuntimeNodeKind.MergeNode streamNodeId nodes
+
+            for sourceId in sourceIds do
+                addEdge (nodeId sourceId) streamNodeId edges
+
+            streamNodeId
+
+    let compile (plan: TopologyPlan) =
+        let nodes = ResizeArray<RuntimeNode>()
+        let edges = ResizeArray<RuntimeEdge>()
+        let sourceIds = plan.Sources |> Seq.map _.SourceId |> Seq.toArray
+        let priorProcessors = ResizeArray<ProcessorPlan>()
+
+        for source in plan.Sources do
+            addNode RuntimeNodeKind.SourceNode (nodeId source.SourceId) nodes
+
+        for processor in plan.Processors do
+            let processorNodeId = nodeId processor.ProcessorId
+            let upstreamNodeId =
+                priorProcessors
+                |> Seq.filter (fun prior -> prior.SourceIds |> Seq.exists (fun sourceId -> processor.SourceIds |> Seq.contains sourceId))
+                |> Seq.tryLast
+                |> Option.map (fun prior -> nodeId prior.ProcessorId)
+                |> Option.defaultWith (fun () -> nodeForStreamId sourceIds processor.StreamId nodes edges)
+
+            addNode RuntimeNodeKind.ProcessorNode processorNodeId nodes
+            addEdge upstreamNodeId processorNodeId edges
+            priorProcessors.Add processor
+
+        for sink in plan.Sinks do
+            let sinkNodeId = nodeId sink.SinkId
+            let upstreamNodeId =
+                plan.Processors
+                |> Seq.filter (fun processor -> processor.SourceIds |> Seq.exists (fun sourceId -> sink.SourceIds |> Seq.contains sourceId))
+                |> Seq.tryLast
+                |> Option.map (fun processor -> nodeId processor.ProcessorId)
+                |> Option.defaultWith (fun () -> nodeForStreamId sourceIds sink.StreamId nodes edges)
+
+            addNode RuntimeNodeKind.SinkNode sinkNodeId nodes
+            addEdge upstreamNodeId sinkNodeId edges
+
+        RuntimeTopologyGraph(
+            nodes |> Seq.toArray,
+            edges |> Seq.toArray,
+            sourceIds |> Array.map nodeId,
+            plan.Sinks |> Seq.map (fun sink -> nodeId sink.SinkId) |> Seq.toArray)
+
+    let tryFindNode nodeId (graph: RuntimeTopologyGraph) =
+        graph.Nodes |> Seq.tryFind (fun node -> node.NodeId = nodeId)
+
+    let outgoing nodeId (graph: RuntimeTopologyGraph) =
+        graph.Edges
+        |> Seq.filter (fun edge -> edge.FromNodeId = nodeId)
+        |> Seq.map _.ToNodeId
+        |> Seq.toArray
+
+[<RequireQualifiedAccess>]
+module internal RoutingSlip =
+    let private classify workItems =
+        if workItems |> Seq.exists (fun item -> item.State = RoutingSlipWorkState.Failed) then
+            RoutingSlipStatus.Failed
+        elif workItems |> Seq.exists (fun item -> item.State = RoutingSlipWorkState.Paused) then
+            RoutingSlipStatus.Paused
+        elif workItems |> Seq.exists (fun item -> item.State = RoutingSlipWorkState.Pending) then
+            RoutingSlipStatus.Pending
+        else
+            RoutingSlipStatus.Completed
+
+    let create sourceId topic partition offset =
+        { SourceId = sourceId
+          Topic = topic
+          Partition = partition
+          Offset = offset
+          WorkItems = Array.empty<RoutingSlipWorkItem>
+          Status = RoutingSlipStatus.Completed }
+
+    let addWork nodeId parentWorkItemId slip =
+        let workItem =
+            { WorkItemId = Guid.NewGuid()
+              NodeId = nodeId
+              ParentWorkItemId = parentWorkItemId
+              State = RoutingSlipWorkState.Pending
+              Failure = None }
+
+        let workItems =
+            slip.WorkItems
+            |> Seq.append [| workItem |]
+            |> Seq.toArray
+
+        { slip with WorkItems = workItems; Status = classify workItems }, workItem
+
+    let private mark state failure workItemId slip =
+        let workItems =
+            slip.WorkItems
+            |> Seq.map (fun item ->
+                if item.WorkItemId = workItemId then
+                    { item with State = state; Failure = failure }
+                else
+                    item)
+            |> Seq.toArray
+
+        { slip with WorkItems = workItems; Status = classify workItems }
+
+    let complete workItemId slip = mark RoutingSlipWorkState.Completed None workItemId slip
+    let drop workItemId slip = mark RoutingSlipWorkState.Dropped None workItemId slip
+    let fail workItemId error slip = mark RoutingSlipWorkState.Failed (Some error) workItemId slip
+    let pause workItemId slip = mark RoutingSlipWorkState.Paused None workItemId slip
+
+    let tryPending slip =
+        slip.WorkItems |> Seq.tryFind (fun item -> item.State = RoutingSlipWorkState.Pending)
 
 type internal RuntimePlan(applicationId: string, bootstrapServers: string, topologies: IReadOnlyList<TopologyPlan>) =
     member _.ApplicationId = applicationId
@@ -167,9 +355,19 @@ type internal TopologyStatus =
     | TopologyStopped
     | TopologyFatal of string
 
+type internal CompletedSourceOffset(topic: string, partition: int, offset: int64) =
+    member _.Topic = topic
+    member _.Partition = partition
+    member _.Offset = offset
+
+type internal TopologyBatchResult =
+    | BatchCompleted of IReadOnlyList<CompletedSourceOffset>
+    | BatchPaused
+    | BatchFailed
+
 type internal TopologyMessage =
     | StartTopology of TopologyPlan * AsyncReplyChannel<Result<unit, TopologyStartError>>
-    | SourceBatchReceived of SourceRecordBatch * AsyncReplyChannel<unit>
+    | SourceBatchReceived of SourceRecordBatch * AsyncReplyChannel<TopologyBatchResult>
     | SourceFailed of topic: string * error: exn
     | ProcessorFailed of processorId: string * error: exn
     | SinkFailed of sinkId: string * error: exn
@@ -258,6 +456,8 @@ module internal SinkActor =
             | WriteBatch (batch, reply) ->
                 task {
                     try
+                        let mutable producedRecordCount = 0
+
                         for record in batch.Records do
                             try
                                 let sinkResult = sinkPlan.Encoder.Invoke record
@@ -271,6 +471,7 @@ module internal SinkActor =
                                             Headers = toKafkaHeaders sinkRecord.Headers)
 
                                     let! _ = producer.ProduceAsync(sinkRecord.Topic, message)
+                                    producedRecordCount <- producedRecordCount + 1
                                     ()
                             with error ->
                                 return reply.Reply(Error {
@@ -282,7 +483,7 @@ module internal SinkActor =
                                     Error = error
                                 })
 
-                        reply.Reply(Ok(BatchProcessingResult(batch.BatchId, batch.Records.Count)))
+                        reply.Reply(Ok(BatchProcessingResult(batch.BatchId, producedRecordCount)))
                     with error ->
                         let record = batch.Records[0]
                         reply.Reply(Error {
@@ -348,9 +549,24 @@ module internal KafkaConsumerActor =
                 BootstrapServers = plan.BootstrapServers,
                 GroupId = plan.GroupId,
                 AutoOffsetReset = Confluent.Kafka.AutoOffsetReset.Earliest,
-                EnableAutoCommit = true)
+                EnableAutoCommit = false)
 
         Confluent.Kafka.ConsumerBuilder<byte array, byte array>(config).Build()
+
+    let private commitResult (consumer: Confluent.Kafka.IConsumer<byte array, byte array>) (result: Confluent.Kafka.ConsumeResult<byte array, byte array>) =
+        consumer.Commit result
+
+    let private commitCompletedOffsets (consumer: Confluent.Kafka.IConsumer<byte array, byte array>) (offsets: IReadOnlyList<CompletedSourceOffset>) =
+        if offsets.Count > 0 then
+            offsets
+            |> Seq.map (fun offset ->
+                Confluent.Kafka.TopicPartitionOffset(
+                    offset.Topic,
+                    Confluent.Kafka.Partition(offset.Partition),
+                    Confluent.Kafka.Offset(offset.Offset + 1L)))
+            |> Seq.toArray
+            |> consumer.Commit
+            |> ignore
 
     let private tryCollectBatch (consumer: Confluent.Kafka.IConsumer<byte array, byte array>) (plan: ConsumerPlan) (source: SourcePlan) =
         try
@@ -367,7 +583,7 @@ module internal KafkaConsumerActor =
                 else
                     match toSourceRecord source result with
                     | Ok (Some record) -> records.Add record
-                    | Ok None -> ()
+                    | Ok None -> commitResult consumer result
                     | Error partition -> consumer.Pause([| Confluent.Kafka.TopicPartition(plan.Topic, Confluent.Kafka.Partition(partition)) |])
 
                     if plan.MaxBatchSize = 1 then
@@ -407,7 +623,13 @@ module internal KafkaConsumerActor =
                 match tryCollectBatch consumer plan source with
                 | Ok (Some batch) ->
                     task {
-                        do! Actor.postAndAsyncReply (fun channel -> SourceBatchReceived(batch, channel)) target |> Async.StartAsTask
+                        let! result = Actor.postAndAsyncReply (fun channel -> SourceBatchReceived(batch, channel)) target |> Async.StartAsTask
+
+                        match result with
+                        | BatchCompleted offsets -> commitCompletedOffsets consumer offsets
+                        | BatchPaused
+                        | BatchFailed -> ()
+
                         Actor.post Poll context.Self
                     }
                     |> ignore
@@ -459,18 +681,28 @@ module internal TopologyActor =
         |> Seq.tryFind (fun (consumerSourceId, _) -> consumerSourceId = sourceId)
         |> Option.iter (fun (_, consumer) -> Actor.postAndAsyncReply (fun channel -> PausePartition(partition, channel)) consumer |> Async.RunSynchronously)
 
-    let private deadLetterBatch (batch: SourceRecordBatch) (record: SourceRecord) (deadLetterValue: obj) =
-        let deadLetterRecord =
-            SourceRecord(
-                record.Topic,
-                record.Partition,
-                record.Offset,
-                record.Key,
-                deadLetterValue,
-                record.Headers,
-                record.TimestampUtc)
+    let private singleRecordBatch (sourceId: string) (record: SourceRecord) =
+        SourceRecordBatch(Guid.NewGuid(), sourceId, [| record |], DateTimeOffset.UtcNow)
 
-        SourceRecordBatch(Guid.NewGuid(), batch.SourceId, [| deadLetterRecord |], DateTimeOffset.UtcNow)
+    let private deadLetterRecord (record: SourceRecord) (deadLetterValue: obj) =
+        SourceRecord(
+            record.Topic,
+            record.Partition,
+            record.Offset,
+            record.Key,
+            deadLetterValue,
+            record.Headers,
+            record.TimestampUtc)
+
+    let private scheduleOutgoing graph (parentWorkItem: RoutingSlipWorkItem) record (workItemRecords: Dictionary<Guid, SourceRecord>) slip =
+        let mutable currentSlip = slip
+
+        for childNodeId in RuntimeTopologyGraph.outgoing parentWorkItem.NodeId graph do
+            let updatedSlip, childWorkItem = RoutingSlip.addWork childNodeId (Some parentWorkItem.WorkItemId) currentSlip
+            workItemRecords[childWorkItem.WorkItemId] <- record
+            currentSlip <- updatedSlip
+
+        currentSlip
 
     let start (runtimePlan: RuntimePlan) (supervisor: Actor<RuntimeSupervisorMessage>) (cancellationToken: CancellationToken) =
         let rec created = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
@@ -481,6 +713,8 @@ module internal TopologyActor =
                     reply.Reply(Error error)
                     Terminate
                 | Ok () ->
+                    let graph = RuntimeTopologyGraph.compile plan
+
                     let processors =
                         plan.Processors
                         |> Seq.map (fun processor -> processor, ProcessorActor.start processor cancellationToken)
@@ -507,7 +741,7 @@ module internal TopologyActor =
                     match startError with
                     | None ->
                         reply.Reply(Ok())
-                        Become(running processors sinks (consumers |> Seq.toList))
+                        Become(running graph processors sinks (consumers |> Seq.toList))
                     | Some error ->
                         stopConsumers consumers
                         stopProcessors processors
@@ -522,58 +756,109 @@ module internal TopologyActor =
                 Terminate
             | _ -> Unhandled)
 
-        and running processors sinks consumers = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
+        and running graph processors sinks consumers = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
             match context.Message with
             | SourceBatchReceived (batch, reply) ->
                 task {
-                    let mutable activeBatch = Some batch
+                    let completedOffsets = ResizeArray<CompletedSourceOffset>()
+                    let mutable terminalResult = None
 
-                    for processorPlan, processor in processors do
-                        if processorPlan.SourceIds |> Seq.contains batch.SourceId && activeBatch.IsSome then
-                            let currentBatch = activeBatch.Value
-                            let! result = Actor.postAndAsyncReply (fun channel -> ProcessBatch(currentBatch, channel)) processor |> Async.StartAsTask
+                    for record in batch.Records do
+                        if terminalResult.IsNone then
+                            let sourceNodeId = RuntimeNodeId batch.SourceId
+                            let workItemRecords = Dictionary<Guid, SourceRecord>()
+                            let mutable slip = RoutingSlip.create batch.SourceId record.Topic record.Partition record.Offset
 
-                            match result with
-                            | Ok _ -> ()
-                            | Error error ->
-                                match error.FailureAction with
-                                | RuntimeProcessorFailureAction.FailTopology ->
-                                    activeBatch <- None
-                                    Actor.post (ProcessorFailed(processorPlan.ProcessorId, error.Error)) context.Self
-                                | RuntimeProcessorFailureAction.Skip ->
-                                    activeBatch <- None
-                                | RuntimeProcessorFailureAction.ContinueAsDeadLetter ->
-                                    activeBatch <- Some(deadLetterBatch currentBatch error.Record (error.DeadLetterFactory.Invoke(error.Record, error.Error)))
-                                | RuntimeProcessorFailureAction.PausePartition ->
-                                    activeBatch <- None
-                                    pauseConsumerPartition error.SourceId error.Record.Partition consumers
-                                | _ ->
-                                    activeBatch <- None
-                                    Actor.post (ProcessorFailed(processorPlan.ProcessorId, error.Error)) context.Self
+                            for childNodeId in RuntimeTopologyGraph.outgoing sourceNodeId graph do
+                                let updatedSlip, workItem = RoutingSlip.addWork childNodeId None slip
+                                workItemRecords[workItem.WorkItemId] <- record
+                                slip <- updatedSlip
 
-                    for sinkPlan, sink in sinks do
-                        if sinkPlan.SourceIds |> Seq.contains batch.SourceId && activeBatch.IsSome then
-                            let currentBatch = activeBatch.Value
-                            let! result = Actor.postAndAsyncReply (fun channel -> WriteBatch(currentBatch, channel)) sink |> Async.StartAsTask
+                            let mutable keepProcessing = true
 
-                            match result with
-                            | Ok _ -> ()
-                            | Error error ->
-                                match error.FailureAction with
-                                | RuntimeProcessorFailureAction.FailTopology ->
-                                    activeBatch <- None
-                                    Actor.post (SinkFailed(sinkPlan.SinkId, error.Error)) context.Self
-                                | RuntimeProcessorFailureAction.Skip
-                                | RuntimeProcessorFailureAction.ContinueAsDeadLetter ->
-                                    activeBatch <- None
-                                | RuntimeProcessorFailureAction.PausePartition ->
-                                    activeBatch <- None
-                                    pauseConsumerPartition error.SourceId error.Record.Partition consumers
-                                | _ ->
-                                    activeBatch <- None
-                                    Actor.post (SinkFailed(sinkPlan.SinkId, error.Error)) context.Self
+                            while keepProcessing do
+                                match RoutingSlip.tryPending slip with
+                                | None -> keepProcessing <- false
+                                | Some workItem when slip.Status <> RoutingSlipStatus.Pending -> keepProcessing <- false
+                                | Some workItem ->
+                                    let routedRecord = workItemRecords[workItem.WorkItemId]
 
-                    reply.Reply()
+                                    match RuntimeTopologyGraph.tryFindNode workItem.NodeId graph with
+                                    | None ->
+                                        slip <- RoutingSlip.fail workItem.WorkItemId (InvalidOperationException("Routing slip referenced an unknown runtime node.")) slip
+                                    | Some node ->
+                                        match node.Kind with
+                                        | RuntimeNodeKind.SourceNode ->
+                                            slip <- RoutingSlip.complete workItem.WorkItemId slip
+                                            slip <- scheduleOutgoing graph workItem routedRecord workItemRecords slip
+                                        | RuntimeNodeKind.MergeNode ->
+                                            slip <- RoutingSlip.complete workItem.WorkItemId slip
+                                            slip <- scheduleOutgoing graph workItem routedRecord workItemRecords slip
+                                        | RuntimeNodeKind.ProcessorNode ->
+                                            match processors |> Seq.tryFind (fun (processorPlan, _) -> RuntimeNodeId processorPlan.ProcessorId = workItem.NodeId) with
+                                            | None ->
+                                                slip <- RoutingSlip.fail workItem.WorkItemId (InvalidOperationException("Routing slip referenced an unknown processor node.")) slip
+                                            | Some (processorPlan, processor) ->
+                                                let! result = Actor.postAndAsyncReply (fun channel -> ProcessBatch(singleRecordBatch batch.SourceId routedRecord, channel)) processor |> Async.StartAsTask
+
+                                                match result with
+                                                | Ok _ ->
+                                                    slip <- RoutingSlip.complete workItem.WorkItemId slip
+                                                    slip <- scheduleOutgoing graph workItem routedRecord workItemRecords slip
+                                                | Error error ->
+                                                    match error.FailureAction with
+                                                    | RuntimeProcessorFailureAction.FailTopology ->
+                                                        slip <- RoutingSlip.fail workItem.WorkItemId error.Error slip
+                                                        Actor.post (ProcessorFailed(processorPlan.ProcessorId, error.Error)) context.Self
+                                                    | RuntimeProcessorFailureAction.Skip ->
+                                                        slip <- RoutingSlip.drop workItem.WorkItemId slip
+                                                    | RuntimeProcessorFailureAction.ContinueAsDeadLetter ->
+                                                        let deadLetter = deadLetterRecord error.Record (error.DeadLetterFactory.Invoke(error.Record, error.Error))
+                                                        slip <- RoutingSlip.complete workItem.WorkItemId slip
+                                                        slip <- scheduleOutgoing graph workItem deadLetter workItemRecords slip
+                                                    | RuntimeProcessorFailureAction.PausePartition ->
+                                                        slip <- RoutingSlip.pause workItem.WorkItemId slip
+                                                        pauseConsumerPartition error.SourceId error.Record.Partition consumers
+                                                    | _ ->
+                                                        slip <- RoutingSlip.fail workItem.WorkItemId error.Error slip
+                                                        Actor.post (ProcessorFailed(processorPlan.ProcessorId, error.Error)) context.Self
+                                        | RuntimeNodeKind.SinkNode ->
+                                            match sinks |> Seq.tryFind (fun (sinkPlan, _) -> RuntimeNodeId sinkPlan.SinkId = workItem.NodeId) with
+                                            | None ->
+                                                slip <- RoutingSlip.fail workItem.WorkItemId (InvalidOperationException("Routing slip referenced an unknown sink node.")) slip
+                                            | Some (sinkPlan, sink) ->
+                                                let! result = Actor.postAndAsyncReply (fun channel -> WriteBatch(singleRecordBatch batch.SourceId routedRecord, channel)) sink |> Async.StartAsTask
+
+                                                match result with
+                                                | Ok sinkResult when sinkResult.ProcessedRecordCount = 0 -> slip <- RoutingSlip.drop workItem.WorkItemId slip
+                                                | Ok _ -> slip <- RoutingSlip.complete workItem.WorkItemId slip
+                                                | Error error ->
+                                                    match error.FailureAction with
+                                                    | RuntimeProcessorFailureAction.FailTopology ->
+                                                        slip <- RoutingSlip.fail workItem.WorkItemId error.Error slip
+                                                        Actor.post (SinkFailed(sinkPlan.SinkId, error.Error)) context.Self
+                                                    | RuntimeProcessorFailureAction.Skip
+                                                    | RuntimeProcessorFailureAction.ContinueAsDeadLetter ->
+                                                        slip <- RoutingSlip.drop workItem.WorkItemId slip
+                                                    | RuntimeProcessorFailureAction.PausePartition ->
+                                                        slip <- RoutingSlip.pause workItem.WorkItemId slip
+                                                        pauseConsumerPartition error.SourceId error.Record.Partition consumers
+                                                    | _ ->
+                                                        slip <- RoutingSlip.fail workItem.WorkItemId error.Error slip
+                                                        Actor.post (SinkFailed(sinkPlan.SinkId, error.Error)) context.Self
+                                        | _ ->
+                                            slip <- RoutingSlip.fail workItem.WorkItemId (InvalidOperationException("Routing slip referenced an unsupported runtime node kind.")) slip
+
+                            match slip.Status with
+                            | RoutingSlipStatus.Completed -> completedOffsets.Add(CompletedSourceOffset(record.Topic, record.Partition, record.Offset))
+                            | RoutingSlipStatus.Paused -> terminalResult <- Some BatchPaused
+                            | RoutingSlipStatus.Failed -> terminalResult <- Some BatchFailed
+                            | RoutingSlipStatus.Pending -> terminalResult <- Some BatchFailed
+                            | _ -> terminalResult <- Some BatchFailed
+
+                    match terminalResult with
+                    | Some result -> reply.Reply result
+                    | None -> reply.Reply(BatchCompleted(completedOffsets |> Seq.toArray))
                 }
                 |> ignore
 
