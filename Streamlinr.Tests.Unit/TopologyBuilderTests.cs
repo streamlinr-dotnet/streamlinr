@@ -35,17 +35,17 @@ public sealed class TopologyBuilderTests {
         var topology = new TopologyBuilder();
 
         topology.Stream<String>("widgets", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter())
-            .ToTopic("processed-widgets", ValueSerializers.String, StringResolver(), DeadLetterHandling.Fail(), ProcessorFailure.FailTopology());
+            .ToTopic("processed-widgets", ValueSerializers.String, StringResolver(), DeadLetterHandling.Fail(), SinkFailure.FailTopology());
     }
 
     [Fact]
     public void ToTopicRequiresExplicitArguments() {
         var stream = new TopologyBuilder().Stream<String>("widgets", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter());
 
-        Assert.Throws<ArgumentException>(() => stream.ToTopic("", ValueSerializers.String, StringResolver(), DeadLetterHandling.Fail(), ProcessorFailure.FailTopology()));
-        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", null!, StringResolver(), DeadLetterHandling.Fail(), ProcessorFailure.FailTopology()));
-        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", ValueSerializers.String, null!, DeadLetterHandling.Fail(), ProcessorFailure.FailTopology()));
-        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", ValueSerializers.String, StringResolver(), null!, ProcessorFailure.FailTopology()));
+        Assert.Throws<ArgumentException>(() => stream.ToTopic("", ValueSerializers.String, StringResolver(), DeadLetterHandling.Fail(), SinkFailure.FailTopology()));
+        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", null!, StringResolver(), DeadLetterHandling.Fail(), SinkFailure.FailTopology()));
+        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", ValueSerializers.String, null!, DeadLetterHandling.Fail(), SinkFailure.FailTopology()));
+        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", ValueSerializers.String, StringResolver(), null!, SinkFailure.FailTopology()));
         Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", ValueSerializers.String, StringResolver(), DeadLetterHandling.Fail(), null!));
     }
 

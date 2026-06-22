@@ -143,13 +143,13 @@ builder.Services.AddStreamlinr(streams =>
             WidgetValueSerializer.Instance,
             resolver,
             deadLetters: DeadLetterHandling.Skip(),
-            failure: ProcessorFailure.FailTopology());
+            failure: SinkFailure.FailTopology());
 });
 ```
 
 The fluent API builds an inspectable topology description. It should not start background work, connect to Kafka, or hide lifecycle behavior during registration.
 
-`ToTopic` is a dedicated sink boundary. It writes `StreamValue.Resolved` values and tombstones to Kafka using explicit serializers and message type metadata. It must also declare explicit dead-letter handling. `DeadLetterHandling.Fail()` treats a `StreamValue.DeadLetter` reaching the sink as a sink failure governed by the sink's processor failure policy. `DeadLetterHandling.Skip()` drops dead-letter values at the sink. Streamlinr should not serialize `StreamValue.DeadLetter` directly to Kafka as a framework-defined DLQ format; applications should transform dead letters into their own resolved error-envelope message type before writing to a dead-letter topic.
+`ToTopic` is a dedicated sink boundary. It writes `StreamValue.Resolved` values and tombstones to Kafka using explicit serializers and message type metadata. It must also declare explicit dead-letter handling and sink failure handling. `DeadLetterHandling.Fail()` treats a `StreamValue.DeadLetter` reaching the sink as a sink failure governed by the sink's `SinkFailure` policy. `DeadLetterHandling.Skip()` drops dead-letter values at the sink. Streamlinr should not serialize `StreamValue.DeadLetter` directly to Kafka as a framework-defined DLQ format; applications should transform dead letters into their own resolved error-envelope message type before writing to a dead-letter topic.
 
 ## Runtime Model
 

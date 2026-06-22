@@ -260,6 +260,13 @@ public sealed class SerializerTests {
         Assert.NotEqual(DeadLetterHandling.Fail(), DeadLetterHandling.Skip());
     }
 
+    [Fact]
+    public void SinkFailureActionsAreDistinct() {
+        Assert.NotEqual(SinkFailure.FailTopology(), SinkFailure.Skip());
+        Assert.NotEqual(SinkFailure.FailTopology(), SinkFailure.PausePartition());
+        Assert.NotEqual(SinkFailure.Skip(), SinkFailure.PausePartition());
+    }
+
     sealed record Widget(String Id, String Status);
     sealed record OtherWidget(String Id, String Status);
 

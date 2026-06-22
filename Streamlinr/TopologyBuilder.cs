@@ -104,21 +104,21 @@ public class TopologyBuilder {
 
     internal void AddSink(SinkDeclaration sink) => _sinks.Add(sink);
 
-    internal static IKeySerializer<T>? ResolveDefaultKeySerializer<T>() {
+    static internal IKeySerializer<T>? ResolveDefaultKeySerializer<T>() {
         if (typeof(T) == typeof(String))
-            return (IKeySerializer<T>)(Object)KeySerializers.String;
+            return (IKeySerializer<T>)KeySerializers.String;
 
         if (typeof(T) == typeof(Byte[]))
-            return (IKeySerializer<T>)(Object)KeySerializers.Bytes;
+            return (IKeySerializer<T>)KeySerializers.Bytes;
 
         if (typeof(T) == typeof(Int32))
-            return (IKeySerializer<T>)(Object)KeySerializers.Int32;
+            return (IKeySerializer<T>)KeySerializers.Int32;
 
         if (typeof(T) == typeof(Int64))
-            return (IKeySerializer<T>)(Object)KeySerializers.Int64;
+            return (IKeySerializer<T>)KeySerializers.Int64;
 
         if (typeof(T) == typeof(Guid))
-            return (IKeySerializer<T>)(Object)KeySerializers.Guid;
+            return (IKeySerializer<T>)KeySerializers.Guid;
 
         return null;
     }
@@ -167,7 +167,7 @@ public sealed class StreamBuilder<TKey> {
     /// <summary>
     /// Writes resolved stream values and tombstones to a Kafka topic using an implicit built-in key serializer.
     /// </summary>
-    public void ToTopic(String topic, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver, DeadLetterHandling deadLetters, ProcessorFailure failure) {
+    public void ToTopic(String topic, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver, DeadLetterHandling deadLetters, SinkFailure failure) {
         var keySerializer = TopologyBuilder.ResolveDefaultKeySerializer<TKey>();
 
         if (keySerializer is null)
@@ -179,7 +179,7 @@ public sealed class StreamBuilder<TKey> {
     /// <summary>
     /// Writes resolved stream values and tombstones to a Kafka topic.
     /// </summary>
-    public void ToTopic(String topic, IKeySerializer<TKey> keySerializer, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver, DeadLetterHandling deadLetters, ProcessorFailure failure) {
+    public void ToTopic(String topic, IKeySerializer<TKey> keySerializer, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver, DeadLetterHandling deadLetters, SinkFailure failure) {
         ArgumentException.ThrowIfNullOrWhiteSpace(topic);
         ArgumentNullException.ThrowIfNull(keySerializer);
         ArgumentNullException.ThrowIfNull(valueSerializer);
@@ -205,4 +205,4 @@ public sealed class StreamBuilder<TKey> {
 sealed record SourceDeclaration(String SourceId, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver, ValueFailure Failure);
 sealed record MergeDeclaration(String MergeId, IReadOnlyList<String> SourceIds);
 sealed record ProcessorDeclaration(String ProcessorId, String StreamId, IReadOnlyList<String> SourceIds, Func<Object, Object, CancellationToken, Task> Callback, ProcessorFailure Failure);
-sealed record SinkDeclaration(String SinkId, String StreamId, IReadOnlyList<String> SourceIds, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver, DeadLetterHandling DeadLetters, ProcessorFailure Failure);
+sealed record SinkDeclaration(String SinkId, String StreamId, IReadOnlyList<String> SourceIds, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver, DeadLetterHandling DeadLetters, SinkFailure Failure);

@@ -62,13 +62,11 @@ static public class StreamlinrApplication {
 
         var sinkPlans = topology.Sinks
             .Select(sink => {
-                ValidateProcessorFailure(sink.Failure);
-
                 return new SinkPlan(
                     sink.SinkId,
                     sink.SourceIds.ToArray(),
                     CreateSinkEncoder(sink),
-                    ToRuntimeProcessorFailureAction(sink.Failure));
+                    ToRuntimeSinkFailureAction(sink.Failure));
             })
             .ToArray();
 
@@ -153,6 +151,13 @@ static public class StreamlinrApplication {
         ProcessorFailure.ContinueAsDeadLetterPolicy => RuntimeProcessorFailureAction.ContinueAsDeadLetter,
         ProcessorFailure.PausePartitionPolicy => RuntimeProcessorFailureAction.PausePartition,
         _ => throw new InvalidOperationException("The requested processor failure policy is not supported by this runtime."),
+    };
+
+    static RuntimeProcessorFailureAction ToRuntimeSinkFailureAction(SinkFailure failure) => failure switch {
+        SinkFailure.FailTopologyPolicy => RuntimeProcessorFailureAction.FailTopology,
+        SinkFailure.SkipPolicy => RuntimeProcessorFailureAction.Skip,
+        SinkFailure.PausePartitionPolicy => RuntimeProcessorFailureAction.PausePartition,
+        _ => throw new InvalidOperationException("The requested sink failure policy is not supported by this runtime."),
     };
 
     static Object CreateProcessorDeadLetter(SourceRecord record, Exception error) {
