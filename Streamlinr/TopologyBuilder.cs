@@ -7,12 +7,15 @@ public class TopologyBuilder {
     readonly List<SourceDeclaration> _sources = [];
     readonly List<MergeDeclaration> _merges = [];
     readonly List<ProcessorDeclaration> _processors = [];
+    readonly List<SinkDeclaration> _sinks = [];
 
     internal IReadOnlyList<SourceDeclaration> Sources => _sources;
 
     internal IReadOnlyList<MergeDeclaration> Merges => _merges;
 
     internal IReadOnlyList<ProcessorDeclaration> Processors => _processors;
+
+    internal IReadOnlyList<SinkDeclaration> Sinks => _sinks;
 
     /// <summary>
     /// Declares a stream sourced from a Kafka topic using an implicit built-in key serializer.
@@ -99,7 +102,9 @@ public class TopologyBuilder {
 
     internal void AddProcessor(ProcessorDeclaration processor) => _processors.Add(processor);
 
-    static IKeySerializer<T>? ResolveDefaultKeySerializer<T>() {
+    internal void AddSink(SinkDeclaration sink) => _sinks.Add(sink);
+
+    internal static IKeySerializer<T>? ResolveDefaultKeySerializer<T>() {
         if (typeof(T) == typeof(String))
             return (IKeySerializer<T>)(Object)KeySerializers.String;
 
@@ -158,8 +163,46 @@ public sealed class StreamBuilder<TKey> {
 
         return this;
     }
+
+    /// <summary>
+    /// Writes resolved stream values and tombstones to a Kafka topic using an implicit built-in key serializer.
+    /// </summary>
+    public void ToTopic(String topic, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver, DeadLetterHandling deadLetters, ProcessorFailure failure) {
+        var keySerializer = TopologyBuilder.ResolveDefaultKeySerializer<TKey>();
+
+        if (keySerializer is null)
+            throw new InvalidOperationException("No default key serializer is available for the requested stream key type. Provide a key serializer explicitly.");
+
+        ToTopic(topic, keySerializer, valueSerializer, messageTypeResolver, deadLetters, failure);
+    }
+
+    /// <summary>
+    /// Writes resolved stream values and tombstones to a Kafka topic.
+    /// </summary>
+    public void ToTopic(String topic, IKeySerializer<TKey> keySerializer, IValueSerializer valueSerializer, IMessageTypeResolver messageTypeResolver, DeadLetterHandling deadLetters, ProcessorFailure failure) {
+        ArgumentException.ThrowIfNullOrWhiteSpace(topic);
+        ArgumentNullException.ThrowIfNull(keySerializer);
+        ArgumentNullException.ThrowIfNull(valueSerializer);
+        ArgumentNullException.ThrowIfNull(messageTypeResolver);
+        ArgumentNullException.ThrowIfNull(deadLetters);
+        ArgumentNullException.ThrowIfNull(failure);
+
+        _topology.AddSink(new SinkDeclaration(
+            SinkId             : $"sink-{_topology.Sinks.Count + 1}",
+            StreamId           : _streamId,
+            SourceIds          : _sourceIds,
+            Topic              : topic,
+            KeyType            : typeof(TKey),
+            KeySerializer      : keySerializer,
+            ValueSerializer    : valueSerializer,
+            MessageTypeResolver: messageTypeResolver,
+            DeadLetters        : deadLetters,
+            Failure            : failure
+        ));
+    }
 }
 
 sealed record SourceDeclaration(String SourceId, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver, ValueFailure Failure);
 sealed record MergeDeclaration(String MergeId, IReadOnlyList<String> SourceIds);
 sealed record ProcessorDeclaration(String ProcessorId, String StreamId, IReadOnlyList<String> SourceIds, Func<Object, Object, CancellationToken, Task> Callback, ProcessorFailure Failure);
+sealed record SinkDeclaration(String SinkId, String StreamId, IReadOnlyList<String> SourceIds, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver, DeadLetterHandling DeadLetters, ProcessorFailure Failure);

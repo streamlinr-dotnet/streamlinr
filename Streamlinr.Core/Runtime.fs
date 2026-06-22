@@ -32,6 +32,22 @@ type internal RuntimeValueResult private (value: obj, shouldEmit: bool, failureA
 
 type internal RuntimeValueDeserializer = delegate of byte array * RuntimeSerializationContext -> RuntimeValueResult
 
+type internal RuntimeSinkRecord(topic: string, key: byte array, value: byte array, headers: IReadOnlyList<RuntimeHeader>) =
+    member _.Topic = topic
+    member _.Key = key
+    member _.Value = value
+    member _.Headers = headers
+
+type internal RuntimeSinkResult private (record: RuntimeSinkRecord, shouldProduce: bool) =
+    member _.Record = record
+    member _.ShouldProduce = shouldProduce
+
+    static member Produce(record: RuntimeSinkRecord) =
+        RuntimeSinkResult(record, true)
+
+    static member Skip() =
+        RuntimeSinkResult(null, false)
+
 type internal SourceRecord(topic: string, partition: int, offset: int64, key: obj, value: obj, headers: IReadOnlyList<RuntimeHeader>, timestampUtc: Nullable<DateTimeOffset>) =
     member _.Topic = topic
     member _.Partition = partition
@@ -40,6 +56,8 @@ type internal SourceRecord(topic: string, partition: int, offset: int64, key: ob
     member _.Value = value
     member _.Headers = headers
     member _.TimestampUtc = timestampUtc
+
+type internal RuntimeSinkEncoder = delegate of SourceRecord -> RuntimeSinkResult
 
 type internal SourceRecordBatch(batchId: Guid, sourceId: string, records: IReadOnlyList<SourceRecord>, receivedAtUtc: DateTimeOffset) =
     member _.BatchId = batchId
@@ -67,6 +85,12 @@ type internal ProcessorPlan(processorId: string, sourceIds: IReadOnlyList<string
     member _.FailureAction = failureAction
     member _.DeadLetterFactory = deadLetterFactory
 
+type internal SinkPlan(sinkId: string, sourceIds: IReadOnlyList<string>, encoder: RuntimeSinkEncoder, failureAction: RuntimeProcessorFailureAction) =
+    member _.SinkId = sinkId
+    member _.SourceIds = sourceIds
+    member _.Encoder = encoder
+    member _.FailureAction = failureAction
+
 type internal SourcePlan(sourceId: string, topic: string, keyTypeName: string, keyDeserializer: RuntimeDeserializer, valueDeserializer: RuntimeValueDeserializer) =
     member _.SourceId = sourceId
     member _.Topic = topic
@@ -74,10 +98,11 @@ type internal SourcePlan(sourceId: string, topic: string, keyTypeName: string, k
     member _.KeyDeserializer = keyDeserializer
     member _.ValueDeserializer = valueDeserializer
 
-type internal TopologyPlan(topologyName: string, sources: IReadOnlyList<SourcePlan>, processors: IReadOnlyList<ProcessorPlan>) =
+type internal TopologyPlan(topologyName: string, sources: IReadOnlyList<SourcePlan>, processors: IReadOnlyList<ProcessorPlan>, sinks: IReadOnlyList<SinkPlan>) =
     member _.TopologyName = topologyName
     member _.Sources = sources
     member _.Processors = processors
+    member _.Sinks = sinks
 
 type internal RuntimePlan(applicationId: string, bootstrapServers: string, topologies: IReadOnlyList<TopologyPlan>) =
     member _.ApplicationId = applicationId
@@ -110,6 +135,14 @@ type internal ProcessorError =
       DeadLetterFactory: RuntimeDeadLetterFactory
       Error: exn }
 
+type internal SinkError =
+    { SinkId: string
+      BatchId: Guid
+      SourceId: string
+      Record: SourceRecord
+      FailureAction: RuntimeProcessorFailureAction
+      Error: exn }
+
 type internal RuntimeStartError =
     { Message: string }
 
@@ -123,6 +156,10 @@ type internal ProcessorMessage =
     | ProcessBatch of SourceRecordBatch * AsyncReplyChannel<Result<BatchProcessingResult, ProcessorError>>
     | StopProcessor of AsyncReplyChannel<unit>
 
+type internal SinkMessage =
+    | WriteBatch of SourceRecordBatch * AsyncReplyChannel<Result<BatchProcessingResult, SinkError>>
+    | StopSink of AsyncReplyChannel<unit>
+
 type internal TopologyStatus =
     | TopologyCreated
     | TopologyRunning
@@ -135,6 +172,7 @@ type internal TopologyMessage =
     | SourceBatchReceived of SourceRecordBatch * AsyncReplyChannel<unit>
     | SourceFailed of topic: string * error: exn
     | ProcessorFailed of processorId: string * error: exn
+    | SinkFailed of sinkId: string * error: exn
     | StopTopology of AsyncReplyChannel<unit>
     | GetTopologyStatus of AsyncReplyChannel<TopologyStatus>
 
@@ -189,6 +227,79 @@ module internal ProcessorActor =
 
                 Handled
             | StopProcessor reply ->
+                reply.Reply()
+                Terminate)
+
+        Actor.start running
+
+[<RequireQualifiedAccess>]
+module internal SinkActor =
+    let private buildProducer (bootstrapServers: string) =
+        let config =
+            Confluent.Kafka.ProducerConfig(
+                BootstrapServers = bootstrapServers,
+                MessageTimeoutMs = 10_000)
+
+        Confluent.Kafka.ProducerBuilder<byte array, byte array>(config).Build()
+
+    let private toKafkaHeaders (headers: IReadOnlyList<RuntimeHeader>) =
+        let kafkaHeaders = Confluent.Kafka.Headers()
+
+        for header in headers do
+            kafkaHeaders.Add(header.Name, header.Value)
+
+        kafkaHeaders
+
+    let start (bootstrapServers: string) (sinkPlan: SinkPlan) =
+        let producer = buildProducer bootstrapServers
+
+        let running = Behaviour (fun (context: ActorContext<SinkMessage>) ->
+            match context.Message with
+            | WriteBatch (batch, reply) ->
+                task {
+                    try
+                        for record in batch.Records do
+                            try
+                                let sinkResult = sinkPlan.Encoder.Invoke record
+
+                                if sinkResult.ShouldProduce then
+                                    let sinkRecord = sinkResult.Record
+                                    let message =
+                                        Confluent.Kafka.Message<byte array, byte array>(
+                                            Key = sinkRecord.Key,
+                                            Value = sinkRecord.Value,
+                                            Headers = toKafkaHeaders sinkRecord.Headers)
+
+                                    let! _ = producer.ProduceAsync(sinkRecord.Topic, message)
+                                    ()
+                            with error ->
+                                return reply.Reply(Error {
+                                    SinkId = sinkPlan.SinkId
+                                    BatchId = batch.BatchId
+                                    SourceId = batch.SourceId
+                                    Record = record
+                                    FailureAction = sinkPlan.FailureAction
+                                    Error = error
+                                })
+
+                        reply.Reply(Ok(BatchProcessingResult(batch.BatchId, batch.Records.Count)))
+                    with error ->
+                        let record = batch.Records[0]
+                        reply.Reply(Error {
+                            SinkId = sinkPlan.SinkId
+                            BatchId = batch.BatchId
+                            SourceId = batch.SourceId
+                            Record = record
+                            FailureAction = sinkPlan.FailureAction
+                            Error = error
+                        })
+                }
+                |> ignore
+
+                Handled
+            | StopSink reply ->
+                producer.Flush(TimeSpan.FromSeconds 10.0) |> ignore
+                producer.Dispose()
                 reply.Reply()
                 Terminate)
 
@@ -326,8 +437,8 @@ module internal TopologyActor =
     let private validate (plan: TopologyPlan) : Result<unit, TopologyStartError> =
         if plan.Sources.Count = 0 then
             Error({ Message = "At least one source is required." } : TopologyStartError)
-        elif plan.Processors.Count = 0 then
-            Error({ Message = "At least one processor is required." } : TopologyStartError)
+        elif plan.Processors.Count = 0 && plan.Sinks.Count = 0 then
+            Error({ Message = "At least one processor or sink is required." } : TopologyStartError)
         else
             Ok()
 
@@ -338,6 +449,10 @@ module internal TopologyActor =
     let private stopProcessors processors =
         for _, processor in processors do
             Actor.postAndAsyncReply StopProcessor processor |> Async.RunSynchronously
+
+    let private stopSinks sinks =
+        for _, sink in sinks do
+            Actor.postAndAsyncReply StopSink sink |> Async.RunSynchronously
 
     let private pauseConsumerPartition sourceId partition consumers =
         consumers
@@ -371,6 +486,11 @@ module internal TopologyActor =
                         |> Seq.map (fun processor -> processor, ProcessorActor.start processor cancellationToken)
                         |> Seq.toList
 
+                    let sinks =
+                        plan.Sinks
+                        |> Seq.map (fun sink -> sink, SinkActor.start runtimePlan.BootstrapServers sink)
+                        |> Seq.toList
+
                     let consumers = ResizeArray<string * Actor<KafkaConsumerMessage>>()
                     let mutable startError = None
 
@@ -387,10 +507,11 @@ module internal TopologyActor =
                     match startError with
                     | None ->
                         reply.Reply(Ok())
-                        Become(running processors (consumers |> Seq.toList))
+                        Become(running processors sinks (consumers |> Seq.toList))
                     | Some error ->
                         stopConsumers consumers
                         stopProcessors processors
+                        stopSinks sinks
                         reply.Reply(Error { Message = error })
                         Terminate
             | GetTopologyStatus reply ->
@@ -401,7 +522,7 @@ module internal TopologyActor =
                 Terminate
             | _ -> Unhandled)
 
-        and running processors consumers = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
+        and running processors sinks consumers = Behaviour(fun (context: ActorContext<TopologyMessage>) ->
             match context.Message with
             | SourceBatchReceived (batch, reply) ->
                 task {
@@ -430,6 +551,28 @@ module internal TopologyActor =
                                     activeBatch <- None
                                     Actor.post (ProcessorFailed(processorPlan.ProcessorId, error.Error)) context.Self
 
+                    for sinkPlan, sink in sinks do
+                        if sinkPlan.SourceIds |> Seq.contains batch.SourceId && activeBatch.IsSome then
+                            let currentBatch = activeBatch.Value
+                            let! result = Actor.postAndAsyncReply (fun channel -> WriteBatch(currentBatch, channel)) sink |> Async.StartAsTask
+
+                            match result with
+                            | Ok _ -> ()
+                            | Error error ->
+                                match error.FailureAction with
+                                | RuntimeProcessorFailureAction.FailTopology ->
+                                    activeBatch <- None
+                                    Actor.post (SinkFailed(sinkPlan.SinkId, error.Error)) context.Self
+                                | RuntimeProcessorFailureAction.Skip
+                                | RuntimeProcessorFailureAction.ContinueAsDeadLetter ->
+                                    activeBatch <- None
+                                | RuntimeProcessorFailureAction.PausePartition ->
+                                    activeBatch <- None
+                                    pauseConsumerPartition error.SourceId error.Record.Partition consumers
+                                | _ ->
+                                    activeBatch <- None
+                                    Actor.post (SinkFailed(sinkPlan.SinkId, error.Error)) context.Self
+
                     reply.Reply()
                 }
                 |> ignore
@@ -438,16 +581,25 @@ module internal TopologyActor =
             | SourceFailed (topic, error) ->
                 stopConsumers consumers
                 stopProcessors processors
+                stopSinks sinks
                 Actor.post (ChildFailed($"source:{topic}", error)) supervisor
                 Become(failed error.Message)
             | ProcessorFailed (processorId, error) ->
                 stopConsumers consumers
                 stopProcessors processors
+                stopSinks sinks
                 Actor.post (ChildFailed($"processor:{processorId}", error)) supervisor
+                Become(failed error.Message)
+            | SinkFailed (sinkId, error) ->
+                stopConsumers consumers
+                stopProcessors processors
+                stopSinks sinks
+                Actor.post (ChildFailed($"sink:{sinkId}", error)) supervisor
                 Become(failed error.Message)
             | StopTopology reply ->
                 stopConsumers consumers
                 stopProcessors processors
+                stopSinks sinks
 
                 reply.Reply()
                 Terminate

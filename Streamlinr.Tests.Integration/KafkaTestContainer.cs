@@ -156,6 +156,30 @@ public class KafkaTestContainer : IAsyncDisposable {
         producer.Flush(TimeSpan.FromSeconds(10));
     }
 
+    public async Task<(Byte[] Key, Byte[]? Value, MessageHeaders Headers)> ConsumeBytesAsync(String topic, String groupId, CancellationToken cancellationToken) {
+        ArgumentException.ThrowIfNullOrEmpty(topic);
+        ArgumentException.ThrowIfNullOrEmpty(groupId);
+
+        using var consumer = new ConsumerBuilder<Byte[], Byte[]>(new ConsumerConfig {
+            BootstrapServers = DirectBootstrapServers,
+            GroupId = groupId,
+            AutoOffsetReset = AutoOffsetReset.Earliest,
+            EnableAutoCommit = false,
+        }).Build();
+
+        consumer.Subscribe(topic);
+
+        while (true) {
+            var result = consumer.Consume(cancellationToken);
+
+            if (result.IsPartitionEOF) {
+                continue;
+            }
+
+            return (result.Message.Key, result.Message.Value, FromKafkaHeaders(result.Message.Headers));
+        }
+    }
+
     public async Task RestoreNetworkAsync(CancellationToken cancellationToken) {
         await ResetToxiproxyAsync(cancellationToken);
         await CreateKafkaProxyAsync(cancellationToken);
@@ -264,6 +288,20 @@ public class KafkaTestContainer : IAsyncDisposable {
         }
 
         return kafkaHeaders;
+    }
+
+    static MessageHeaders FromKafkaHeaders(Headers headers) {
+        if (headers is null) {
+            return new MessageHeaders();
+        }
+
+        var messageHeaders = new MessageHeaders();
+
+        foreach (var header in headers) {
+            messageHeaders.Add(header.Key, header.GetValueBytes());
+        }
+
+        return messageHeaders;
     }
 
     async Task CreateKafkaProxyAsync(CancellationToken cancellationToken) {

@@ -34,8 +34,8 @@ static public class StreamlinrApplication {
         if (topology.Sources.Count == 0)
             throw new InvalidOperationException("At least one stream source is required.");
 
-        if (topology.Processors.Count == 0)
-            throw new InvalidOperationException("At least one processor is required.");
+        if (topology.Processors.Count == 0 && topology.Sinks.Count == 0)
+            throw new InvalidOperationException("At least one processor or sink is required.");
 
         var sourcePlans = topology.Sources
             .Select(source => new SourcePlan(
@@ -60,7 +60,19 @@ static public class StreamlinrApplication {
             })
             .ToArray();
 
-        var topologyPlan = new TopologyPlan("default", sourcePlans, processorPlans);
+        var sinkPlans = topology.Sinks
+            .Select(sink => {
+                ValidateProcessorFailure(sink.Failure);
+
+                return new SinkPlan(
+                    sink.SinkId,
+                    sink.SourceIds.ToArray(),
+                    CreateSinkEncoder(sink),
+                    ToRuntimeProcessorFailureAction(sink.Failure));
+            })
+            .ToArray();
+
+        var topologyPlan = new TopologyPlan("default", sourcePlans, processorPlans, sinkPlans);
 
         return new RuntimePlan(options.ApplicationId, options.BootstrapServers, [topologyPlan]);
     }
@@ -73,6 +85,14 @@ static public class StreamlinrApplication {
         return (RuntimeDeserializer)method.Invoke(null, [serializer])!;
     }
 
+    static RuntimeSinkEncoder CreateSinkEncoder(SinkDeclaration sink) {
+        var method = typeof(StreamlinrApplication)
+            .GetMethod(nameof(CreateSinkEncoderCore), BindingFlags.NonPublic | BindingFlags.Static)!
+            .MakeGenericMethod(sink.KeyType);
+
+        return (RuntimeSinkEncoder)method.Invoke(null, [sink])!;
+    }
+
     static RuntimeDeserializer CreateKeyDeserializerCore<T>(IKeySerializer<T> serializer) =>
         new RuntimeDeserializer((data, context) => {
             var headers              = new MessageHeaders(context.Headers.Select(header => (header.Name, header.Value)));
@@ -80,6 +100,47 @@ static public class StreamlinrApplication {
 
             return serializer.Deserialize(data, serializationContext)!;
         });
+
+    static RuntimeSinkEncoder CreateSinkEncoderCore<TKey>(SinkDeclaration sink) =>
+        new RuntimeSinkEncoder(record => {
+            var keySerializer = (IKeySerializer<TKey>)sink.KeySerializer;
+
+            return record.Value switch {
+                StreamValue.Resolved resolved => CreateResolvedSinkRecord(sink, keySerializer, (TKey)record.Key, resolved),
+                StreamValue.Tombstone => CreateTombstoneSinkRecord(sink, keySerializer, (TKey)record.Key),
+                StreamValue.DeadLetter deadLetter => ApplyDeadLetterHandling(sink.DeadLetters, deadLetter),
+                _ => throw new InvalidOperationException($"Unsupported stream value type '{record.Value.GetType().FullName}'."),
+            };
+        });
+
+    static RuntimeSinkResult CreateResolvedSinkRecord<TKey>(SinkDeclaration sink, IKeySerializer<TKey> keySerializer, TKey key, StreamValue.Resolved value) {
+        var headers = new MessageHeaders();
+        var context = new SerializationContext(sink.Topic, headers);
+        sink.MessageTypeResolver.WriteType(value.Type, context);
+
+        return RuntimeSinkResult.Produce(new RuntimeSinkRecord(
+            sink.Topic,
+            keySerializer.Serialize(key, context),
+            sink.ValueSerializer.Serialize(value.Value, value.Type, context),
+            headers.All.Select(header => new RuntimeHeader(header.Name, header.Value)).ToArray()));
+    }
+
+    static RuntimeSinkResult CreateTombstoneSinkRecord<TKey>(SinkDeclaration sink, IKeySerializer<TKey> keySerializer, TKey key) {
+        var headers = new MessageHeaders();
+        var context = new SerializationContext(sink.Topic, headers);
+
+        return RuntimeSinkResult.Produce(new RuntimeSinkRecord(
+            sink.Topic,
+            keySerializer.Serialize(key, context),
+            null!,
+            headers.All.Select(header => new RuntimeHeader(header.Name, header.Value)).ToArray()));
+    }
+
+    static RuntimeSinkResult ApplyDeadLetterHandling(DeadLetterHandling deadLetters, StreamValue.DeadLetter deadLetter) => deadLetters switch {
+        DeadLetterHandling.FailPolicy => throw new InvalidOperationException($"Dead-letter value reached topic sink: {deadLetter.Reason}"),
+        DeadLetterHandling.SkipPolicy => RuntimeSinkResult.Skip(),
+        _ => throw new InvalidOperationException("The requested dead-letter handling policy is not supported by this runtime."),
+    };
 
     static void ValidateProcessorFailure(ProcessorFailure failure) {
         if (failure is not (ProcessorFailure.FailTopologyPolicy or ProcessorFailure.SkipPolicy or ProcessorFailure.ContinueAsDeadLetterPolicy or ProcessorFailure.PausePartitionPolicy))

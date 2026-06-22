@@ -255,6 +255,11 @@ public sealed class SerializerTests {
         Assert.NotEqual(ValueFailureAction.ContinueAsDeadLetter(), ValueFailureAction.PausePartition());
     }
 
+    [Fact]
+    public void DeadLetterHandlingActionsAreDistinct() {
+        Assert.NotEqual(DeadLetterHandling.Fail(), DeadLetterHandling.Skip());
+    }
+
     sealed record Widget(String Id, String Status);
     sealed record OtherWidget(String Id, String Status);
 
