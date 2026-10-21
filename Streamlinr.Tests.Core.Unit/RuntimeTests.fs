@@ -10,9 +10,6 @@ module RuntimeTests =
         Assert.True(task.Wait(TimeSpan.FromSeconds 2.0), "Timed out waiting for actor response.")
         task.Result
 
-    let private deadLetterFactory =
-        RuntimeDeadLetterFactory(fun record _ -> record.Value)
-
     let private noOpProcessor =
         RecordProcessor(fun _ _ -> Task.CompletedTask)
 
@@ -20,10 +17,10 @@ module RuntimeTests =
         RuntimeSinkEncoder(fun _ -> RuntimeSinkResult.Skip())
 
     let private processorPlan processor =
-        ProcessorPlan("peek-1", "source-1", [| "source-1" |], processor, RuntimeProcessorFailureAction.FailTopology, deadLetterFactory)
+        ProcessorPlan("peek-1", "source-1", [| "source-1" |], processor, RuntimeProcessorFailureAction.FailTopology)
 
     let private processorPlanWithFailureAction failureAction processor =
-        ProcessorPlan("peek-1", "source-1", [| "source-1" |], processor, failureAction, deadLetterFactory)
+        ProcessorPlan("peek-1", "source-1", [| "source-1" |], processor, failureAction)
 
     let private sourcePlan sourceId =
         SourcePlan(
@@ -31,7 +28,7 @@ module RuntimeTests =
             $"{sourceId}-topic",
             typeof<string>.FullName,
             RuntimeDeserializer(fun _ _ -> "order-1"),
-            RuntimeValueDeserializer(fun _ _ -> RuntimeValueResult.Emit("created")))
+            RuntimeValueDeserializer(fun _ _ -> RuntimeValueResult.Emit(RuntimeStreamValue.Resolved("created", typeof<string>))))
 
     let private sinkPlan sinkId streamId sourceIds =
         SinkPlan(sinkId, streamId, sourceIds, skipSinkEncoder, RuntimeProcessorFailureAction.FailTopology)
@@ -45,7 +42,7 @@ module RuntimeTests =
         Assert.Contains(graph.Edges, fun edge -> edgePair edge = (fromNodeId, toNodeId))
 
     let private sourceRecord () =
-        SourceRecord("orders", 0, 1L, "order-1", "created", Array.empty<RuntimeHeader>, Nullable())
+        SourceRecord("orders", 0, 1L, "order-1", RuntimeStreamValue.Resolved("created", typeof<string>), Array.empty<RuntimeHeader>, Nullable())
 
     [<Fact>]
     let ``runtime topology graph compiles source to processor`` () =
@@ -77,8 +74,8 @@ module RuntimeTests =
 
     [<Fact>]
     let ``runtime topology graph chains processors in declaration order`` () =
-        let first = ProcessorPlan("peek-1", "source-1", [| "source-1" |], noOpProcessor, RuntimeProcessorFailureAction.FailTopology, deadLetterFactory)
-        let second = ProcessorPlan("peek-2", "source-1", [| "source-1" |], noOpProcessor, RuntimeProcessorFailureAction.FailTopology, deadLetterFactory)
+        let first = ProcessorPlan("peek-1", "source-1", [| "source-1" |], noOpProcessor, RuntimeProcessorFailureAction.FailTopology)
+        let second = ProcessorPlan("peek-2", "source-1", [| "source-1" |], noOpProcessor, RuntimeProcessorFailureAction.FailTopology)
         let plan = TopologyPlan("default", [| sourcePlan "source-1" |], [| first; second |], [| sinkPlan "sink-1" "source-1" [| "source-1" |] |])
 
         let graph = RuntimeTopologyGraph.compile plan
@@ -89,7 +86,7 @@ module RuntimeTests =
 
     [<Fact>]
     let ``runtime topology graph compiles merged source streams`` () =
-        let processor = ProcessorPlan("peek-1", "merge-1", [| "source-1"; "source-2" |], noOpProcessor, RuntimeProcessorFailureAction.FailTopology, deadLetterFactory)
+        let processor = ProcessorPlan("peek-1", "merge-1", [| "source-1"; "source-2" |], noOpProcessor, RuntimeProcessorFailureAction.FailTopology)
         let plan = TopologyPlan("default", [| sourcePlan "source-1"; sourcePlan "source-2" |], [| processor |], Array.empty<SinkPlan>)
 
         let graph = RuntimeTopologyGraph.compile plan
@@ -147,10 +144,10 @@ module RuntimeTests =
 
     [<Fact>]
     let ``runtime value result can emit a value`` () =
-        let result = RuntimeValueResult.Emit("created")
+        let result = RuntimeValueResult.Emit(RuntimeStreamValue.Resolved("created", typeof<string>))
 
         Assert.True(result.ShouldEmit)
-        Assert.Equal("created", result.Value :?> string)
+        Assert.Equal(RuntimeStreamValue.Resolved("created", typeof<string>), result.Value)
 
     [<Fact>]
     let ``runtime value result can skip a value`` () =
@@ -202,7 +199,6 @@ module RuntimeTests =
             Assert.Equal("peek-1", error.ProcessorId)
             Assert.Equal("source-1", error.SourceId)
             Assert.Equal(RuntimeProcessorFailureAction.FailTopology, error.FailureAction)
-            Assert.Same(deadLetterFactory, error.DeadLetterFactory)
             Assert.Contains("callback failed", error.Error.Message)
 
     [<Fact>]
@@ -242,7 +238,6 @@ module RuntimeTests =
         | Error error ->
             Assert.Equal(RuntimeProcessorFailureAction.ContinueAsDeadLetter, error.FailureAction)
             Assert.Same(record, error.Record)
-            Assert.Equal("created", error.DeadLetterFactory.Invoke(record, error.Error) :?> string)
 
     [<Fact>]
     let ``processor actor reports pause partition failure action`` () =
@@ -262,3 +257,30 @@ module RuntimeTests =
         | Error error ->
             Assert.Equal(RuntimeProcessorFailureAction.PausePartition, error.FailureAction)
             Assert.Same(record, error.Record)
+
+    [<Fact>]
+    let ``processor dead letters preserve payload and source metadata without nesting envelopes`` () =
+        let payload = obj()
+        let headers = [| RuntimeHeader("message-type", [| 1uy |]); RuntimeHeader("message-type", [| 2uy |]) |]
+        let error = InvalidOperationException("callback failed")
+        let values =
+            [ RuntimeStreamValue.Resolved(payload, typeof<obj>), payload
+              RuntimeStreamValue.Tombstone, null
+              RuntimeStreamValue.DeadLetter(null, payload, "previous failure", null, headers), payload ]
+
+        for value, expectedPayload in values do
+            let record = SourceRecord("orders", 2, 42L, "order-1", value, headers, Nullable())
+            let deadLetter = TopologyActor.deadLetterRecord record error
+
+            Assert.Equal(record.Topic, deadLetter.Topic)
+            Assert.Equal(record.Partition, deadLetter.Partition)
+            Assert.Equal(record.Offset, deadLetter.Offset)
+            Assert.Same(record.Headers, deadLetter.Headers)
+            match deadLetter.Value with
+            | RuntimeStreamValue.DeadLetter(key, data, reason, failure, valueHeaders) ->
+                Assert.Equal("order-1", key :?> string)
+                Assert.Same(expectedPayload, data)
+                Assert.Equal("Processor failed at topic 'orders', partition 2, offset 42.", reason)
+                Assert.Same(error, failure)
+                Assert.Same(headers, valueHeaders)
+            | _ -> Assert.Fail("Expected a runtime dead-letter envelope.")

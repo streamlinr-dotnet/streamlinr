@@ -55,9 +55,8 @@ static public class StreamlinrApplication {
                     processorId      : processor.ProcessorId,
                     streamId         : processor.StreamId,
                     sourceIds        : processor.SourceIds.ToArray(),
-                    processor        : (record, token) => processor.Callback(record.Key, record.Value, token),
-                    failureAction    : ToRuntimeProcessorFailureAction(processor.Failure),
-                    deadLetterFactory: CreateProcessorDeadLetter);
+                    processor        : (record, token) => processor.Callback(record.Key, ToStreamValue(record.Value), token),
+                    failureAction    : ToRuntimeProcessorFailureAction(processor.Failure));
             })
             .ToArray();
 
@@ -104,7 +103,7 @@ static public class StreamlinrApplication {
         record => {
             var keySerializer = (IKeySerializer<TKey>)sink.KeySerializer;
 
-            return record.Value switch {
+            return ToStreamValue(record.Value) switch {
                 StreamValue.Resolved resolved     => CreateResolvedSinkRecord(sink, keySerializer, (TKey)record.Key, resolved),
                 StreamValue.Tombstone             => CreateTombstoneSinkRecord(sink, keySerializer, (TKey)record.Key),
                 StreamValue.DeadLetter deadLetter => ApplyDeadLetterHandling(sink.DeadLetters, deadLetter),
@@ -138,64 +137,68 @@ static public class StreamlinrApplication {
     }
 
     static RuntimeSinkResult ApplyDeadLetterHandling(DeadLetterHandling deadLetters, StreamValue.DeadLetter deadLetter) => deadLetters switch {
-        DeadLetterHandling.FailPolicy => throw new InvalidOperationException($"Dead-letter value reached topic sink: {deadLetter.Reason}"),
-        DeadLetterHandling.SkipPolicy => RuntimeSinkResult.Skip(),
+        DeadLetterHandling.Fail => throw new InvalidOperationException($"Dead-letter value reached topic sink: {deadLetter.Reason}"),
+        DeadLetterHandling.Skip => RuntimeSinkResult.Skip(),
         _ => throw new InvalidOperationException("The requested dead-letter handling policy is not supported by this runtime."),
     };
 
     static void ValidateProcessorFailure(ProcessorFailure failure) {
-        if (failure is not (ProcessorFailure.FailTopologyPolicy or ProcessorFailure.SkipPolicy or ProcessorFailure.ContinueAsDeadLetterPolicy or ProcessorFailure.PausePartitionPolicy))
+        if (failure is not (ProcessorFailure.FailTopology or ProcessorFailure.Skip or ProcessorFailure.ContinueAsDeadLetter or ProcessorFailure.PausePartition))
             throw new InvalidOperationException("The requested processor failure policy is not supported by this runtime.");
     }
 
     static RuntimeProcessorFailureAction ToRuntimeProcessorFailureAction(ProcessorFailure failure) => failure switch {
-        ProcessorFailure.FailTopologyPolicy         => RuntimeProcessorFailureAction.FailTopology,
-        ProcessorFailure.SkipPolicy                 => RuntimeProcessorFailureAction.Skip,
-        ProcessorFailure.ContinueAsDeadLetterPolicy => RuntimeProcessorFailureAction.ContinueAsDeadLetter,
-        ProcessorFailure.PausePartitionPolicy       => RuntimeProcessorFailureAction.PausePartition,
+        ProcessorFailure.FailTopology        => RuntimeProcessorFailureAction.FailTopology,
+        ProcessorFailure.Skip                => RuntimeProcessorFailureAction.Skip,
+        ProcessorFailure.ContinueAsDeadLetter => RuntimeProcessorFailureAction.ContinueAsDeadLetter,
+        ProcessorFailure.PausePartition       => RuntimeProcessorFailureAction.PausePartition,
         _ => throw new InvalidOperationException("The requested processor failure policy is not supported by this runtime."),
     };
 
     static RuntimeProcessorFailureAction ToRuntimeSinkFailureAction(SinkFailure failure) => failure switch {
-        SinkFailure.FailTopologyPolicy   => RuntimeProcessorFailureAction.FailTopology,
-        SinkFailure.SkipPolicy           => RuntimeProcessorFailureAction.Skip,
-        SinkFailure.PausePartitionPolicy => RuntimeProcessorFailureAction.PausePartition,
+        SinkFailure.FailTopology  => RuntimeProcessorFailureAction.FailTopology,
+        SinkFailure.Skip          => RuntimeProcessorFailureAction.Skip,
+        SinkFailure.PausePartition => RuntimeProcessorFailureAction.PausePartition,
         _ => throw new InvalidOperationException("The requested sink failure policy is not supported by this runtime."),
     };
 
-    static StreamValue.DeadLetter CreateProcessorDeadLetter(SourceRecord record, Exception error) {
-        var headers = new MessageHeaders(record.Headers.Select(header => (header.Name, header.Value)));
-        return new StreamValue.DeadLetter(record.Key, record.Value, $"Processor failed at topic '{record.Topic}', partition {record.Partition}, offset {record.Offset}.", error, headers);
-    }
+    internal static StreamValue ToStreamValue(RuntimeStreamValue value) => value switch {
+        RuntimeStreamValue.Resolved resolved => new StreamValue.Resolved(resolved.value, resolved.valueType),
+        RuntimeStreamValue.DeadLetter deadLetter => new StreamValue.DeadLetter(
+            deadLetter.keyData, deadLetter.valueData, deadLetter.reason, deadLetter.error,
+            new MessageHeaders(deadLetter.headers.Select(header => (header.Name, header.Value)))),
+        _ when value.IsTombstone => new StreamValue.Tombstone(),
+        _ => throw new InvalidOperationException("Unsupported runtime stream value."),
+    };
 
     static RuntimeValueDeserializer CreateValueDeserializer(IValueSerializer serializer, IMessageTypeResolver messageTypeResolver, ValueFailure failure) {
         return (data, context) => {
             var headers              = new MessageHeaders(context.Headers.Select(header => (header.Name, header.Value)));
             var serializationContext = new SerializationContext(context.Topic, headers);
 
-            if (data is null) return RuntimeValueResult.Emit(new StreamValue.Tombstone());
+            if (data is null) return RuntimeValueResult.Emit(RuntimeStreamValue.Tombstone);
 
             return messageTypeResolver.ResolveType(serializationContext) switch {
                 MessageTypeResolution.Resolved resolved     => DeserializeValue(serializer, data, resolved.Type, serializationContext, headers, failure.DeserializationFailed),
-                MessageTypeResolution.Unresolved unresolved => ApplyValueFailure(failure.Unresolved, new StreamValue.DeadLetter(null, data, unresolved.Reason, null, headers)),
-                _ => ApplyValueFailure(failure.Unresolved, new StreamValue.DeadLetter(null, data, "Message type resolver returned an unsupported resolution result.", null, headers)),
+                MessageTypeResolution.Unresolved unresolved => ApplyValueFailure(failure.Unresolved, RuntimeStreamValue.NewDeadLetter(null!, data, unresolved.Reason, null!, context.Headers)),
+                _ => ApplyValueFailure(failure.Unresolved, RuntimeStreamValue.NewDeadLetter(null!, data, "Message type resolver returned an unsupported resolution result.", null!, context.Headers)),
             };
         };
     }
 
     static RuntimeValueResult DeserializeValue(IValueSerializer serializer, Byte[] data, Type valueType, SerializationContext context, MessageHeaders headers, ValueFailureAction failureAction) {
         try {
-            return RuntimeValueResult.Emit(new StreamValue.Resolved(serializer.Deserialize(data, valueType, context), valueType));
+            return RuntimeValueResult.Emit(RuntimeStreamValue.NewResolved(serializer.Deserialize(data, valueType, context), valueType));
         }
         catch (Exception error) {
-            return ApplyValueFailure(failureAction, new StreamValue.DeadLetter(null, data, $"Failed to deserialize value as CLR type '{valueType.FullName}'.", error, headers));
+            return ApplyValueFailure(failureAction, RuntimeStreamValue.NewDeadLetter(null!, data, $"Failed to deserialize value as CLR type '{valueType.FullName}'.", error, headers.All.Select(header => new RuntimeHeader(header.Name, header.Value)).ToArray()));
         }
     }
 
-    static RuntimeValueResult ApplyValueFailure(ValueFailureAction action, StreamValue.DeadLetter deadLetter) => action switch {
-        ValueFailureAction.SkipPolicy                 => RuntimeValueResult.Fail(RuntimeValueFailureAction.Skip),
-        ValueFailureAction.ContinueAsDeadLetterPolicy => RuntimeValueResult.Emit(deadLetter),
-        ValueFailureAction.PausePartitionPolicy       => RuntimeValueResult.Fail(RuntimeValueFailureAction.PausePartition),
+    static RuntimeValueResult ApplyValueFailure(ValueFailureAction action, RuntimeStreamValue deadLetter) => action switch {
+        ValueFailureAction.Skip                => RuntimeValueResult.Fail(RuntimeValueFailureAction.Skip),
+        ValueFailureAction.ContinueAsDeadLetter => RuntimeValueResult.Emit(deadLetter),
+        ValueFailureAction.PausePartition       => RuntimeValueResult.Fail(RuntimeValueFailureAction.PausePartition),
         _ => throw new InvalidOperationException("The requested value failure action is not supported by this runtime."),
     };
 }

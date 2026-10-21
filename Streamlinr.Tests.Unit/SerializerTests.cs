@@ -227,44 +227,33 @@ public sealed class SerializerTests {
     public void ValueFailureContinueAsDeadLetterAppliesToAllValueFailures() {
         var failure = ValueFailure.ContinueAsDeadLetter();
 
-        Assert.Equal(ValueFailureAction.ContinueAsDeadLetter(), failure.Unresolved);
-        Assert.Equal(ValueFailureAction.ContinueAsDeadLetter(), failure.DeserializationFailed);
+        Assert.Equal<ValueFailureAction>(new ValueFailureAction.ContinueAsDeadLetter(), failure.Unresolved);
+        Assert.Equal<ValueFailureAction>(new ValueFailureAction.ContinueAsDeadLetter(), failure.DeserializationFailed);
     }
 
     [Fact]
     public void ValueFailureCanSpecifyPhaseSpecificActions() {
-        var unresolved = ValueFailureAction.Skip();
-        var deserializationFailed = ValueFailureAction.PausePartition();
+        ValueFailureAction unresolved = new ValueFailureAction.Skip();
+        ValueFailureAction deserializationFailed = new ValueFailureAction.PausePartition();
 
         var failure = ValueFailure.On(unresolved, deserializationFailed);
 
-        Assert.Same(unresolved, failure.Unresolved);
-        Assert.Same(deserializationFailed, failure.DeserializationFailed);
-    }
-
-    [Fact]
-    public void ValueFailureRequiresBothPhaseActions() {
-        Assert.Throws<ArgumentNullException>(() => ValueFailure.On(null!, ValueFailureAction.ContinueAsDeadLetter()));
-        Assert.Throws<ArgumentNullException>(() => ValueFailure.On(ValueFailureAction.ContinueAsDeadLetter(), null!));
+        Assert.Equal(unresolved, failure.Unresolved);
+        Assert.Equal(deserializationFailed, failure.DeserializationFailed);
     }
 
     [Fact]
     public void ValueFailureActionsAreDistinct() {
-        Assert.NotEqual(ValueFailureAction.Skip(), ValueFailureAction.ContinueAsDeadLetter());
-        Assert.NotEqual(ValueFailureAction.Skip(), ValueFailureAction.PausePartition());
-        Assert.NotEqual(ValueFailureAction.ContinueAsDeadLetter(), ValueFailureAction.PausePartition());
-    }
-
-    [Fact]
-    public void DeadLetterHandlingActionsAreDistinct() {
-        Assert.NotEqual(DeadLetterHandling.Fail(), DeadLetterHandling.Skip());
+        Assert.NotEqual<ValueFailureAction>(new ValueFailureAction.Skip(), new ValueFailureAction.ContinueAsDeadLetter());
+        Assert.NotEqual<ValueFailureAction>(new ValueFailureAction.Skip(), new ValueFailureAction.PausePartition());
+        Assert.NotEqual<ValueFailureAction>(new ValueFailureAction.ContinueAsDeadLetter(), new ValueFailureAction.PausePartition());
     }
 
     [Fact]
     public void SinkFailureActionsAreDistinct() {
-        Assert.NotEqual(SinkFailure.FailTopology(), SinkFailure.Skip());
-        Assert.NotEqual(SinkFailure.FailTopology(), SinkFailure.PausePartition());
-        Assert.NotEqual(SinkFailure.Skip(), SinkFailure.PausePartition());
+        Assert.NotEqual<SinkFailure>(new SinkFailure.FailTopology(), new SinkFailure.Skip());
+        Assert.NotEqual<SinkFailure>(new SinkFailure.FailTopology(), new SinkFailure.PausePartition());
+        Assert.NotEqual<SinkFailure>(new SinkFailure.Skip(), new SinkFailure.PausePartition());
     }
 
     sealed record Widget(String Id, String Status);

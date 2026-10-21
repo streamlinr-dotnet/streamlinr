@@ -1,37 +1,28 @@
 namespace Streamlinr;
 
+using static ProcessorFailure;
+
 /// <summary>
 /// Defines how a processor handles unhandled exceptions from user callback code.
 /// </summary>
-public abstract record ProcessorFailure {
-    private protected ProcessorFailure() {
-    }
-
+public readonly union ProcessorFailure(FailTopology, Skip, ContinueAsDeadLetter, PausePartition) {
     /// <summary>
     /// Treat an unhandled processor exception as fatal to the topology.
     /// </summary>
-    static public ProcessorFailure FailTopology() => new FailTopologyPolicy();
+    public record struct FailTopology;
 
     /// <summary>
     /// Skip the failed record and continue processing later records.
     /// </summary>
-    static public ProcessorFailure Skip() => new SkipPolicy();
+    public record struct Skip;
 
     /// <summary>
     /// Continue downstream processing by representing the failed record as <see cref="StreamValue.DeadLetter" />.
     /// </summary>
-    static public ProcessorFailure ContinueAsDeadLetter() => new ContinueAsDeadLetterPolicy();
+    public record struct ContinueAsDeadLetter;
 
     /// <summary>
     /// Pause processing for the failed record's partition until the runtime is stopped.
     /// </summary>
-    static public ProcessorFailure PausePartition() => new PausePartitionPolicy();
-
-    internal sealed record FailTopologyPolicy : ProcessorFailure;
-
-    internal sealed record SkipPolicy : ProcessorFailure;
-
-    internal sealed record ContinueAsDeadLetterPolicy : ProcessorFailure;
-
-    internal sealed record PausePartitionPolicy : ProcessorFailure;
+    public record struct PausePartition;
 }

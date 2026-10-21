@@ -8,7 +8,7 @@ public sealed class TopologyBuilderTests {
         var topology = new TopologyBuilder();
 
         topology.Stream<String>("orders", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter())
-            .Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology());
+            .Peek((_, _) => ValueTask.CompletedTask, new ProcessorFailure.FailTopology());
     }
 
     [Fact]
@@ -16,18 +16,18 @@ public sealed class TopologyBuilderTests {
         var topology = new TopologyBuilder();
 
         topology.Stream<Int32>("widgets", new Int32Serializer(), new WidgetValueSerializer(), WidgetResolver(), ValueFailure.ContinueAsDeadLetter())
-            .Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology());
+            .Peek((_, _) => ValueTask.CompletedTask, new ProcessorFailure.FailTopology());
     }
 
     [Fact]
     public void StreamCanDeclarePhaseSpecificValueFailurePolicy() {
         var topology = new TopologyBuilder();
         var valueFailure = ValueFailure.On(
-            unresolved           : ValueFailureAction.Skip(),
-            deserializationFailed: ValueFailureAction.PausePartition());
+            unresolved           : new ValueFailureAction.Skip(),
+            deserializationFailed: new ValueFailureAction.PausePartition());
 
         topology.Stream<String>("widgets", ValueSerializers.String, StringResolver(), valueFailure)
-            .Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology());
+            .Peek((_, _) => ValueTask.CompletedTask, new ProcessorFailure.FailTopology());
     }
 
     [Fact]
@@ -35,27 +35,25 @@ public sealed class TopologyBuilderTests {
         var topology = new TopologyBuilder();
 
         topology.Stream<String>("widgets", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter())
-            .ToTopic("processed-widgets", ValueSerializers.String, StringResolver(), DeadLetterHandling.Fail(), SinkFailure.FailTopology());
+            .ToTopic("processed-widgets", ValueSerializers.String, StringResolver(), new DeadLetterHandling.Fail(), new SinkFailure.FailTopology());
     }
 
     [Fact]
     public void ToTopicRequiresExplicitArguments() {
         var stream = new TopologyBuilder().Stream<String>("widgets", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter());
 
-        Assert.Throws<ArgumentException>(() => stream.ToTopic("", ValueSerializers.String, StringResolver(), DeadLetterHandling.Fail(), SinkFailure.FailTopology()));
-        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", null!, StringResolver(), DeadLetterHandling.Fail(), SinkFailure.FailTopology()));
-        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", ValueSerializers.String, null!, DeadLetterHandling.Fail(), SinkFailure.FailTopology()));
-        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", ValueSerializers.String, StringResolver(), null!, SinkFailure.FailTopology()));
-        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", ValueSerializers.String, StringResolver(), DeadLetterHandling.Fail(), null!));
+        Assert.Throws<ArgumentException>(() => stream.ToTopic("", ValueSerializers.String, StringResolver(), new DeadLetterHandling.Fail(), new SinkFailure.FailTopology()));
+        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", null!, StringResolver(), new DeadLetterHandling.Fail(), new SinkFailure.FailTopology()));
+        Assert.Throws<ArgumentNullException>(() => stream.ToTopic("processed-widgets", ValueSerializers.String, null!, new DeadLetterHandling.Fail(), new SinkFailure.FailTopology()));
     }
 
     [Fact]
     public void StreamCanUseBuiltInKeySerializers() {
         var topology = new TopologyBuilder();
 
-        topology.Stream<Int32>("widgets-by-int", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology());
-        topology.Stream<Int64>("widgets-by-long", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology());
-        topology.Stream<Guid>("widgets-by-guid", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology());
+        topology.Stream<Int32>("widgets-by-int", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, new ProcessorFailure.FailTopology());
+        topology.Stream<Int64>("widgets-by-long", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, new ProcessorFailure.FailTopology());
+        topology.Stream<Guid>("widgets-by-guid", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, new ProcessorFailure.FailTopology());
     }
 
     [Fact]
@@ -65,7 +63,7 @@ public sealed class TopologyBuilderTests {
         var payments = topology.Stream<String>("payments", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter());
 
         topology.Merge(orders, payments)
-            .Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology());
+            .Peek((_, _) => ValueTask.CompletedTask, new ProcessorFailure.FailTopology());
     }
 
     [Fact]
@@ -87,7 +85,7 @@ public sealed class TopologyBuilderTests {
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => StreamlinrApplication.RunAsync(
             options,
-            topology => topology.Stream<String>("orders", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology()),
+            topology => topology.Stream<String>("orders", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, new ProcessorFailure.FailTopology()),
             TestContext.Current.CancellationToken
         ));
 
@@ -100,7 +98,7 @@ public sealed class TopologyBuilderTests {
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => StreamlinrApplication.RunAsync(
             options,
-            topology => topology.Stream<String>("orders", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, ProcessorFailure.FailTopology()),
+            topology => topology.Stream<String>("orders", ValueSerializers.String, StringResolver(), ValueFailure.ContinueAsDeadLetter()).Peek((_, _) => ValueTask.CompletedTask, new ProcessorFailure.FailTopology()),
             TestContext.Current.CancellationToken
         ));
 

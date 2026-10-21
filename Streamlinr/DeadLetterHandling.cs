@@ -1,23 +1,18 @@
 namespace Streamlinr;
 
+using static DeadLetterHandling;
+
 /// <summary>
 /// Defines how a topic sink handles <see cref="StreamValue.DeadLetter" /> values.
 /// </summary>
-public abstract record DeadLetterHandling {
-    private protected DeadLetterHandling() {
-    }
-
+public readonly union DeadLetterHandling(Fail, Skip) {
     /// <summary>
     /// Treat a dead-letter value reaching the sink as a sink failure.
     /// </summary>
-    static public DeadLetterHandling Fail() => new FailPolicy();
+    public record struct Fail;
 
     /// <summary>
     /// Skip dead-letter values and continue processing later records.
     /// </summary>
-    static public DeadLetterHandling Skip() => new SkipPolicy();
-
-    internal sealed record FailPolicy : DeadLetterHandling;
-
-    internal sealed record SkipPolicy : DeadLetterHandling;
+    public record struct Skip;
 }

@@ -1,30 +1,23 @@
 namespace Streamlinr;
 
+using static SinkFailure;
+
 /// <summary>
 /// Defines how a terminal sink handles failures while writing output.
 /// </summary>
-public abstract record SinkFailure {
-    private protected SinkFailure() {
-    }
-
+public readonly union SinkFailure(FailTopology, Skip, PausePartition) {
     /// <summary>
     /// Treat a sink failure as fatal to the topology.
     /// </summary>
-    static public SinkFailure FailTopology() => new FailTopologyPolicy();
+    public record struct FailTopology;
 
     /// <summary>
     /// Skip the failed sink write and continue processing later records.
     /// </summary>
-    static public SinkFailure Skip() => new SkipPolicy();
+    public record struct Skip;
 
     /// <summary>
     /// Pause processing for the failed record's partition until the runtime is stopped.
     /// </summary>
-    static public SinkFailure PausePartition() => new PausePartitionPolicy();
-
-    internal sealed record FailTopologyPolicy : SinkFailure;
-
-    internal sealed record SkipPolicy : SinkFailure;
-
-    internal sealed record PausePartitionPolicy : SinkFailure;
+    public record struct PausePartition;
 }

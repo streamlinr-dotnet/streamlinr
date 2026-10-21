@@ -24,7 +24,7 @@ public sealed class OffsetCommitTests(KafkaIntegrationFixture fixture) : IClassF
                     .Peek((_, _) => {
                         processed.TrySetResult();
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -58,7 +58,7 @@ public sealed class OffsetCommitTests(KafkaIntegrationFixture fixture) : IClassF
                     .Peek((_, _) => {
                         processed.TrySetResult();
                         throw new InvalidOperationException("processor failed");
-                    }, ProcessorFailure.Skip());
+                    }, new ProcessorFailure.Skip());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -92,7 +92,7 @@ public sealed class OffsetCommitTests(KafkaIntegrationFixture fixture) : IClassF
                     .Peek((_, _) => {
                         processed.TrySetResult();
                         throw new InvalidOperationException("processor failed");
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 

@@ -1,5 +1,7 @@
 namespace Streamlinr;
 
+using static ValueFailureAction;
+
 /// <summary>
 /// Defines how a stream source handles failures while resolving or deserializing message values.
 /// </summary>
@@ -10,16 +12,13 @@ public sealed record ValueFailure(ValueFailureAction Unresolved, ValueFailureAct
     /// Continue processing all value failures by representing the failed value as <see cref="StreamValue.DeadLetter" />.
     /// </summary>
     static public ValueFailure ContinueAsDeadLetter() => On(
-        unresolved           : ValueFailureAction.ContinueAsDeadLetter(),
-        deserializationFailed: ValueFailureAction.ContinueAsDeadLetter());
+        unresolved           : new ValueFailureAction.ContinueAsDeadLetter(),
+        deserializationFailed: new ValueFailureAction.ContinueAsDeadLetter());
 
     /// <summary>
     /// Defines separate behavior for type resolution and deserialization failures.
     /// </summary>
     static public ValueFailure On(ValueFailureAction unresolved, ValueFailureAction deserializationFailed) {
-        ArgumentNullException.ThrowIfNull(unresolved);
-        ArgumentNullException.ThrowIfNull(deserializationFailed);
-
         return new ValueFailure(unresolved, deserializationFailed);
     }
 }
@@ -27,28 +26,19 @@ public sealed record ValueFailure(ValueFailureAction Unresolved, ValueFailureAct
 /// <summary>
 /// Defines a terminal action for a value resolution or deserialization failure.
 /// </summary>
-public abstract record ValueFailureAction {
-    private protected ValueFailureAction() {
-    }
-
+public readonly union ValueFailureAction(Skip, ContinueAsDeadLetter, PausePartition) {
     /// <summary>
     /// Skip the failed record and continue processing later records.
     /// </summary>
-    static public ValueFailureAction Skip() => new SkipPolicy();
+    public record struct Skip;
 
     /// <summary>
     /// Continue processing by representing the failed value as <see cref="StreamValue.DeadLetter" />.
     /// </summary>
-    static public ValueFailureAction ContinueAsDeadLetter() => new ContinueAsDeadLetterPolicy();
+    public record struct ContinueAsDeadLetter;
 
     /// <summary>
     /// Pause processing for the failed record's partition until the runtime is stopped.
     /// </summary>
-    static public ValueFailureAction PausePartition() => new PausePartitionPolicy();
-
-    internal sealed record SkipPolicy : ValueFailureAction;
-
-    internal sealed record ContinueAsDeadLetterPolicy : ValueFailureAction;
-
-    internal sealed record PausePartitionPolicy : ValueFailureAction;
+    public record struct PausePartition;
 }

@@ -30,7 +30,7 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -59,7 +59,10 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
 
         var record = await received.Task;
         Assert.Equal("widget-1", record.Key);
-        var value = Assert.IsType<StreamValue.Resolved>(record.Value);
+        var value = record.Value switch {
+            StreamValue.Resolved matched => matched,
+            _ => throw new Xunit.Sdk.XunitException("Expected a Resolved stream value."),
+        };
         Assert.Equal(typeof(KafkaIntegrationFixture.Widget), value.Type);
         Assert.Equal(new KafkaIntegrationFixture.Widget("widget-1", "created"), value.Value);
     }
@@ -91,7 +94,7 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -115,7 +118,10 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
 
         var record = await received.Task;
         Assert.Equal("widget-1", record.Key);
-        var value = Assert.IsType<StreamValue.DeadLetter>(record.Value);
+        var value = record.Value switch {
+            StreamValue.DeadLetter matched => matched,
+            _ => throw new Xunit.Sdk.XunitException("Expected a DeadLetter stream value."),
+        };
         Assert.Contains("not mapped", value.Reason);
         Assert.IsType<Byte[]>(value.ValueData);
         Assert.Null(value.Error);
@@ -148,7 +154,7 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -173,7 +179,7 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
 
         var record = await received.Task;
         Assert.Equal("widget-1", record.Key);
-        Assert.IsType<StreamValue.Tombstone>(record.Value);
+        Assert.True(record.Value is StreamValue.Tombstone);
     }
 
     [Fact]
@@ -203,7 +209,7 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -225,7 +231,10 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
 
         var record = await received.Task;
         Assert.Equal("widget-1", record.Key);
-        var value = Assert.IsType<StreamValue.DeadLetter>(record.Value);
+        var value = record.Value switch {
+            StreamValue.DeadLetter matched => matched,
+            _ => throw new Xunit.Sdk.XunitException("Expected a DeadLetter stream value."),
+        };
         Assert.IsType<Byte[]>(value.ValueData);
         Assert.Contains(typeof(KafkaIntegrationFixture.Widget).FullName!, value.Reason);
         Assert.IsType<InvalidOperationException>(value.Error);
@@ -252,15 +261,15 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
                         valueSerializer    : new KafkaIntegrationFixture.WidgetValueSerializer(),
                         messageTypeResolver: KafkaIntegrationFixture.WidgetResolver(),
                         failure            : ValueFailure.On(
-                            unresolved           : ValueFailureAction.Skip(),
-                            deserializationFailed: ValueFailureAction.ContinueAsDeadLetter())
+                            unresolved           : new ValueFailureAction.Skip(),
+                            deserializationFailed: new ValueFailureAction.ContinueAsDeadLetter())
                     )
                     .Peek((record, _) => {
                         if (received.TrySetResult(record))
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -291,7 +300,10 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
 
         var record = await received.Task;
         Assert.Equal("bad-widget", record.Key);
-        var value = Assert.IsType<StreamValue.DeadLetter>(record.Value);
+        var value = record.Value switch {
+            StreamValue.DeadLetter matched => matched,
+            _ => throw new Xunit.Sdk.XunitException("Expected a DeadLetter stream value."),
+        };
         Assert.Contains(typeof(KafkaIntegrationFixture.Widget).FullName!, value.Reason);
         Assert.IsType<InvalidOperationException>(value.Error);
     }
@@ -319,8 +331,8 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
                         valueSerializer    : new KafkaIntegrationFixture.WidgetValueSerializer(),
                         messageTypeResolver: KafkaIntegrationFixture.WidgetResolver(),
                         failure            : ValueFailure.On(
-                            unresolved           : ValueFailureAction.ContinueAsDeadLetter(),
-                            deserializationFailed: ValueFailureAction.PausePartition())
+                            unresolved           : new ValueFailureAction.ContinueAsDeadLetter(),
+                            deserializationFailed: new ValueFailureAction.PausePartition())
                     )
                     .Peek((record, _) => {
                         lock (receivedKeys) {
@@ -334,7 +346,7 @@ public sealed class SerializationTests(KafkaIntegrationFixture fixture) : IClass
                             partitionOneSecondReceived.TrySetResult();
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 

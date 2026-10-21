@@ -9,6 +9,11 @@ type internal RuntimeHeader(name: string, value: byte array) =
     member _.Name = name
     member _.Value = value
 
+type internal RuntimeStreamValue =
+    | Resolved of value: obj * valueType: Type
+    | Tombstone
+    | DeadLetter of keyData: obj * valueData: obj * reason: string * error: exn * headers: IReadOnlyList<RuntimeHeader>
+
 type internal RuntimeSerializationContext(topic: string, headers: IReadOnlyList<RuntimeHeader>) =
     member _.Topic = topic
     member _.Headers = headers
@@ -19,16 +24,16 @@ type internal RuntimeValueFailureAction =
     | Skip = 0
     | PausePartition = 1
 
-type internal RuntimeValueResult private (value: obj, shouldEmit: bool, failureAction: RuntimeValueFailureAction) =
+type internal RuntimeValueResult private (value: RuntimeStreamValue, shouldEmit: bool, failureAction: RuntimeValueFailureAction) =
     member _.Value = value
     member _.ShouldEmit = shouldEmit
     member _.FailureAction = failureAction
 
-    static member Emit(value: obj) =
+    static member Emit(value: RuntimeStreamValue) =
         RuntimeValueResult(value, true, RuntimeValueFailureAction.Skip)
 
     static member Fail(action: RuntimeValueFailureAction) =
-        RuntimeValueResult(null, false, action)
+        RuntimeValueResult(Unchecked.defaultof<RuntimeStreamValue>, false, action)
 
 type internal RuntimeValueDeserializer = delegate of byte array * RuntimeSerializationContext -> RuntimeValueResult
 
@@ -48,7 +53,7 @@ type internal RuntimeSinkResult private (record: RuntimeSinkRecord, shouldProduc
     static member Skip() =
         RuntimeSinkResult(null, false)
 
-type internal SourceRecord(topic: string, partition: int, offset: int64, key: obj, value: obj, headers: IReadOnlyList<RuntimeHeader>, timestampUtc: Nullable<DateTimeOffset>) =
+type internal SourceRecord(topic: string, partition: int, offset: int64, key: obj, value: RuntimeStreamValue, headers: IReadOnlyList<RuntimeHeader>, timestampUtc: Nullable<DateTimeOffset>) =
     member _.Topic = topic
     member _.Partition = partition
     member _.Offset = offset
@@ -70,7 +75,6 @@ type internal BatchProcessingResult(batchId: Guid, processedRecordCount: int) =
     member _.ProcessedRecordCount = processedRecordCount
 
 type internal RecordProcessor = delegate of SourceRecord * CancellationToken -> Task
-type internal RuntimeDeadLetterFactory = delegate of SourceRecord * exn -> obj
 
 type internal RuntimeProcessorFailureAction =
     | FailTopology = 0
@@ -78,13 +82,12 @@ type internal RuntimeProcessorFailureAction =
     | ContinueAsDeadLetter = 2
     | PausePartition = 3
 
-type internal ProcessorPlan(processorId: string, streamId: string, sourceIds: IReadOnlyList<string>, processor: RecordProcessor, failureAction: RuntimeProcessorFailureAction, deadLetterFactory: RuntimeDeadLetterFactory) =
+type internal ProcessorPlan(processorId: string, streamId: string, sourceIds: IReadOnlyList<string>, processor: RecordProcessor, failureAction: RuntimeProcessorFailureAction) =
     member _.ProcessorId = processorId
     member _.StreamId = streamId
     member _.SourceIds = sourceIds
     member _.Processor = processor
     member _.FailureAction = failureAction
-    member _.DeadLetterFactory = deadLetterFactory
 
 type internal SinkPlan(sinkId: string, streamId: string, sourceIds: IReadOnlyList<string>, encoder: RuntimeSinkEncoder, failureAction: RuntimeProcessorFailureAction) =
     member _.SinkId = sinkId
@@ -320,7 +323,6 @@ type internal ProcessorError =
       SourceId: string
       Record: SourceRecord
       FailureAction: RuntimeProcessorFailureAction
-      DeadLetterFactory: RuntimeDeadLetterFactory
       Error: exn }
 
 type internal SinkError =
@@ -404,7 +406,6 @@ module internal ProcessorActor =
                                     SourceId = batch.SourceId
                                     Record = record
                                     FailureAction = processorPlan.FailureAction
-                                    DeadLetterFactory = processorPlan.DeadLetterFactory
                                     Error = error
                                 })
 
@@ -417,7 +418,6 @@ module internal ProcessorActor =
                             SourceId = batch.SourceId
                             Record = record
                             FailureAction = processorPlan.FailureAction
-                            DeadLetterFactory = processorPlan.DeadLetterFactory
                             Error = error
                         })
                 }
@@ -684,7 +684,15 @@ module internal TopologyActor =
     let private singleRecordBatch (sourceId: string) (record: SourceRecord) =
         SourceRecordBatch(Guid.NewGuid(), sourceId, [| record |], DateTimeOffset.UtcNow)
 
-    let private deadLetterRecord (record: SourceRecord) (deadLetterValue: obj) =
+    let internal deadLetterRecord (record: SourceRecord) (error: exn) =
+        let valueData =
+            match record.Value with
+            | RuntimeStreamValue.Resolved(value, _) -> value
+            | RuntimeStreamValue.Tombstone -> null
+            | RuntimeStreamValue.DeadLetter(_, value, _, _, _) -> value
+
+        let reason = $"Processor failed at topic '{record.Topic}', partition {record.Partition}, offset {record.Offset}."
+        let deadLetterValue = RuntimeStreamValue.DeadLetter(record.Key, valueData, reason, error, record.Headers)
         SourceRecord(
             record.Topic,
             record.Partition,
@@ -813,7 +821,7 @@ module internal TopologyActor =
                                                     | RuntimeProcessorFailureAction.Skip ->
                                                         slip <- RoutingSlip.drop workItem.WorkItemId slip
                                                     | RuntimeProcessorFailureAction.ContinueAsDeadLetter ->
-                                                        let deadLetter = deadLetterRecord error.Record (error.DeadLetterFactory.Invoke(error.Record, error.Error))
+                                                        let deadLetter = deadLetterRecord error.Record error.Error
                                                         slip <- RoutingSlip.complete workItem.WorkItemId slip
                                                         slip <- scheduleOutgoing graph workItem deadLetter workItemRecords slip
                                                     | RuntimeProcessorFailureAction.PausePartition ->

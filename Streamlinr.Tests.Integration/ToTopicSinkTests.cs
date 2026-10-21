@@ -23,7 +23,7 @@ public sealed class ToTopicSinkTests(KafkaIntegrationFixture fixture) : IClassFi
             configureTopology: topology => {
                 topology
                     .Stream<String>(inputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), ValueFailure.ContinueAsDeadLetter())
-                    .ToTopic(outputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), DeadLetterHandling.Fail(), SinkFailure.FailTopology());
+                    .ToTopic(outputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), new DeadLetterHandling.Fail(), new SinkFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -67,7 +67,7 @@ public sealed class ToTopicSinkTests(KafkaIntegrationFixture fixture) : IClassFi
             configureTopology: topology => {
                 topology
                     .Stream<String>(inputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), ValueFailure.ContinueAsDeadLetter())
-                    .ToTopic(outputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), DeadLetterHandling.Fail(), SinkFailure.FailTopology());
+                    .ToTopic(outputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), new DeadLetterHandling.Fail(), new SinkFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -113,7 +113,7 @@ public sealed class ToTopicSinkTests(KafkaIntegrationFixture fixture) : IClassFi
             configureTopology: topology => {
                 topology
                     .Stream<String>(inputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), ValueFailure.ContinueAsDeadLetter())
-                    .ToTopic(outputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), DeadLetterHandling.Skip(), SinkFailure.FailTopology());
+                    .ToTopic(outputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), new DeadLetterHandling.Skip(), new SinkFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -157,7 +157,7 @@ public sealed class ToTopicSinkTests(KafkaIntegrationFixture fixture) : IClassFi
             configureTopology: topology => {
                 topology
                     .Stream<String>(inputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), ValueFailure.ContinueAsDeadLetter())
-                    .ToTopic(outputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), DeadLetterHandling.Fail(), SinkFailure.FailTopology());
+                    .ToTopic(outputTopic, ValueSerializers.String, KafkaIntegrationFixture.StringResolver(), new DeadLetterHandling.Fail(), new SinkFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 

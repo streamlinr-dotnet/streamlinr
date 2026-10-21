@@ -30,7 +30,7 @@ public sealed class PeekProcessorTests(KafkaIntegrationFixture fixture) : IClass
                             stopStreamlinr.Cancel();
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -51,7 +51,10 @@ public sealed class PeekProcessorTests(KafkaIntegrationFixture fixture) : IClass
 
         var record = await received.Task;
         Assert.Equal("order-1", record.Key);
-        var value = Assert.IsType<StreamValue.Resolved>(record.Value);
+        var value = record.Value switch {
+            StreamValue.Resolved matched => matched,
+            _ => throw new Xunit.Sdk.XunitException("Expected a Resolved stream value."),
+        };
         Assert.Equal(typeof(String), value.Type);
         Assert.Equal("created", value.Value);
     }
@@ -81,7 +84,7 @@ public sealed class PeekProcessorTests(KafkaIntegrationFixture fixture) : IClass
                     .Peek((_, _) => {
                         processorStarted.TrySetResult();
                         throw new InvalidOperationException("processor failed");
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -126,11 +129,11 @@ public sealed class PeekProcessorTests(KafkaIntegrationFixture fixture) : IClass
                     .Peek((_, _) => {
                         firstProcessorStarted.TrySetResult();
                         throw new InvalidOperationException("processor failed");
-                    }, ProcessorFailure.Skip())
+                    }, new ProcessorFailure.Skip())
                     .Peek((record, _) => {
                         downstreamReceived.TrySetResult(record);
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -168,12 +171,12 @@ public sealed class PeekProcessorTests(KafkaIntegrationFixture fixture) : IClass
                         messageTypeResolver: KafkaIntegrationFixture.StringResolver(),
                         failure            : ValueFailure.ContinueAsDeadLetter()
                     )
-                    .Peek((_, _) => throw new InvalidOperationException("processor failed"), ProcessorFailure.ContinueAsDeadLetter())
+                    .Peek((_, _) => throw new InvalidOperationException("processor failed"), new ProcessorFailure.ContinueAsDeadLetter())
                     .Peek((record, _) => {
                         downstreamReceived.TrySetResult(record);
                         stopStreamlinr.Cancel();
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 
@@ -194,9 +197,13 @@ public sealed class PeekProcessorTests(KafkaIntegrationFixture fixture) : IClass
 
         var record = await downstreamReceived.Task;
         Assert.Equal("message-1", record.Key);
-        var value = Assert.IsType<StreamValue.DeadLetter>(record.Value);
+        var value = record.Value switch {
+            StreamValue.DeadLetter matched => matched,
+            _ => throw new Xunit.Sdk.XunitException("Expected a DeadLetter stream value."),
+        };
         Assert.Equal("message-1", value.KeyData);
-        Assert.IsType<StreamValue.Resolved>(value.ValueData);
+        Assert.Equal("value-1", Assert.IsType<String>(value.ValueData));
+        Assert.True(value.Headers.Contains("message-type"));
         Assert.Contains("partition", value.Reason);
         Assert.IsType<InvalidOperationException>(value.Error);
     }
@@ -238,7 +245,7 @@ public sealed class PeekProcessorTests(KafkaIntegrationFixture fixture) : IClass
                         }
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.PausePartition())
+                    }, new ProcessorFailure.PausePartition())
                     .Peek((record, _) => {
                         lock (downstreamKeys) {
                             downstreamKeys.Add(record.Key);
@@ -251,7 +258,7 @@ public sealed class PeekProcessorTests(KafkaIntegrationFixture fixture) : IClass
                             partitionOneSecondReceived.TrySetResult();
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 

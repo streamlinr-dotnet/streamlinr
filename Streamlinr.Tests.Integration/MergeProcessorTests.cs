@@ -47,7 +47,7 @@ public sealed class MergeProcessorTests(KafkaIntegrationFixture fixture) : IClas
                         }
 
                         return ValueTask.CompletedTask;
-                    }, ProcessorFailure.FailTopology());
+                    }, new ProcessorFailure.FailTopology());
             },
             cancellationToken: stopStreamlinr.Token);
 

@@ -97,6 +97,8 @@ Implemented value failure actions are skip, continue as dead letter, and pause p
 - `Tombstone`: the Kafka value was null.
 - `DeadLetter`: value processing failed at a boundary configured to continue as dead-letter data.
 
+The runtime carries a Core-owned `RuntimeStreamValue` envelope with resolved, tombstone, and dead-letter cases. The C# adapter constructs this representation during deserialization and maps it to public `StreamValue` values for callbacks and sinks. Only application keys and payloads remain opaque objects; public value envelopes are not transported through Core as objects. Core creates processor dead letters using the underlying payload, source metadata, headers, and exception.
+
 The `DeadLetter` payload should include the original key data when available, the failed value data, headers, reason, and optional exception. Its value data should be `System.Object` because different failure boundaries have different available representations. During deserialization failure, the value data will usually be raw `Byte[]`. During later processor failure, the value data may already be a deserialized CLR object.
 
 Unknown message types and deserialization failures are data when the stream declares `ValueFailure.ContinueAsDeadLetter()` or a phase-specific `ValueFailure.On(...)` action that continues as dead letter. They remain in the stream as explicit `StreamValue.DeadLetter` cases so future split, tee, and dead-letter processors can route them deliberately.
@@ -107,7 +109,7 @@ This is intentionally different from exception-driven stream processing. Excepti
 
 User-defined processor code is another runtime failure boundary. Processor declarations must explicitly state what should happen if user callback code throws. Processor failure policy describes the terminal outcome after any retry, timeout, or resilience behavior the callback itself applies. If a processor needs Polly or another retry strategy around an external dependency, the callback should own that strategy before allowing an exception to escape to Streamlinr.
 
-The first implemented processor failure policies are `ProcessorFailure.FailTopology()`, `ProcessorFailure.Skip()`, `ProcessorFailure.ContinueAsDeadLetter()`, and `ProcessorFailure.PausePartition()`.
+The first implemented processor failure policies are `new ProcessorFailure.FailTopology()`, `new ProcessorFailure.Skip()`, `new ProcessorFailure.ContinueAsDeadLetter()`, and `new ProcessorFailure.PausePartition()`.
 
 Failing the topology is the safest behavior when correctness is uncertain because it avoids silently advancing offsets past failed processing, hiding bugs, or continuing after a partial state mutation. Skipping a record, continuing as dead-letter data, or pausing a partition are explicit terminal choices for processors whose domain semantics make those outcomes safe. Continuing after user-code failure must always be an explicit choice, never hidden default behavior.
 
@@ -143,7 +145,7 @@ builder.Services.AddStreamlinr(streams =>
             WidgetValueSerializer.Instance,
             resolver,
             deadLetters: DeadLetterHandling.Skip(),
-            failure: SinkFailure.FailTopology());
+            failure: new SinkFailure.FailTopology());
 });
 ```
 

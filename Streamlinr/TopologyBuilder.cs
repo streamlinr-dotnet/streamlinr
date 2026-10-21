@@ -151,13 +151,12 @@ public sealed class StreamBuilder<TKey> {
     /// <returns>The current stream builder.</returns>
     public StreamBuilder<TKey> Peek(Func<StreamRecord<TKey>, CancellationToken, ValueTask> callback, ProcessorFailure failure) {
         ArgumentNullException.ThrowIfNull(callback);
-        ArgumentNullException.ThrowIfNull(failure);
 
         _topology.AddProcessor(new ProcessorDeclaration(
             ProcessorId: $"peek-{_topology.Processors.Count + 1}",
             StreamId   : _streamId,
             SourceIds  : _sourceIds,
-            Callback   : (key, value, cancellationToken) => callback(new StreamRecord<TKey>((TKey)key, (StreamValue)value), cancellationToken).AsTask(),
+            Callback   : (key, value, cancellationToken) => callback(new StreamRecord<TKey>((TKey)key, value), cancellationToken).AsTask(),
             Failure    : failure
         ));
 
@@ -184,8 +183,6 @@ public sealed class StreamBuilder<TKey> {
         ArgumentNullException.ThrowIfNull(keySerializer);
         ArgumentNullException.ThrowIfNull(valueSerializer);
         ArgumentNullException.ThrowIfNull(messageTypeResolver);
-        ArgumentNullException.ThrowIfNull(deadLetters);
-        ArgumentNullException.ThrowIfNull(failure);
 
         _topology.AddSink(new SinkDeclaration(
             SinkId             : $"sink-{_topology.Sinks.Count + 1}",
@@ -204,5 +201,5 @@ public sealed class StreamBuilder<TKey> {
 
 sealed record SourceDeclaration(String SourceId, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver, ValueFailure Failure);
 sealed record MergeDeclaration(String MergeId, IReadOnlyList<String> SourceIds);
-sealed record ProcessorDeclaration(String ProcessorId, String StreamId, IReadOnlyList<String> SourceIds, Func<Object, Object, CancellationToken, Task> Callback, ProcessorFailure Failure);
+sealed record ProcessorDeclaration(String ProcessorId, String StreamId, IReadOnlyList<String> SourceIds, Func<Object, StreamValue, CancellationToken, Task> Callback, ProcessorFailure Failure);
 sealed record SinkDeclaration(String SinkId, String StreamId, IReadOnlyList<String> SourceIds, String Topic, Type KeyType, Object KeySerializer, IValueSerializer ValueSerializer, IMessageTypeResolver MessageTypeResolver, DeadLetterHandling DeadLetters, SinkFailure Failure);
