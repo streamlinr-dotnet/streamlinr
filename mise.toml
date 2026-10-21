@@ -3,6 +3,7 @@ dotnet = "11.0.100-rc.2.26504.105"
 
 [env]
 DOTNET_CLI_TELEMETRY_OPTOUT = "true"
+SuppressNETCoreSdkPreviewMessage = "true"
 
 [tasks.restore]
 description = "Restore packages and tools"
