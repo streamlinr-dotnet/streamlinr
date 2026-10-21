@@ -41,8 +41,7 @@ public class KafkaTestContainer : IAsyncDisposable {
         _configuration = configuration;
         _network = new NetworkBuilder().Build();
 
-        _toxiproxy = new ContainerBuilder()
-            .WithImage("ghcr.io/shopify/toxiproxy:2.12.0")
+        _toxiproxy = new ContainerBuilder("ghcr.io/shopify/toxiproxy:2.12.0")
             .WithNetwork(_network)
             .WithNetworkAliases(ToxiproxyAlias)
             .WithPortBinding(ToxiproxyControlPort, true)
@@ -50,8 +49,7 @@ public class KafkaTestContainer : IAsyncDisposable {
             .WithWaitStrategy(Wait.ForUnixContainer().UntilHttpRequestIsSucceeded(request => request.ForPath("/version").ForPort(ToxiproxyControlPort)))
             .Build();
 
-        _kafka = new ContainerBuilder()
-            .WithImage(_configuration.Image)
+        _kafka = new ContainerBuilder(_configuration.Image)
             .WithNetwork(_network)
             .WithNetworkAliases(KafkaAlias)
             .WithPortBinding(_directHostPort, KafkaDirectPort)
